@@ -1,0 +1,90 @@
+{
+  "project": "kryptos-broker",
+  "version": "1.0.0",
+  "generated": "2026-09-22",
+  "states": {
+    "database": {
+      "db_init": "PASS",
+      "migration_001": "PASS",
+      "migration_002": "PASS",
+      "idempotent_rerun": "PASS",
+      "data_preservation": "PASS",
+      "registry_tables": "PASS",
+      "indexes": "PASS",
+      "constraints": "PASS"
+    },
+    "verification": {
+      "typecheck": "PASS",
+      "lint": "NOT APPLICABLE",
+      "lint_note": "No linter is configured in this repository; not claimed as executed. tsc --strict covers compile-time correctness.",
+      "build": "PASS",
+      "tests": "PASS",
+      "tests_count": "42/42",
+      "security_tests": "PASS",
+      "secret_scan": "PASS",
+      "git_source_audit": "FAIL (pre-fix, 2026-09-23) — `git ls-files` in BOTH vasuguptadot-jpg/Kryptos and vasuguptadot-jpg/Kryptos2 returned exactly ONE entry: the backup ZIP. No package.json, no src/, no app/ was ever committed. PASS (post-fix) — the real source tree is now committed (65 files).",
+      "postgres_store_runtime": "PASS (production next start + real PostgreSQL 17: atomic rate limits, audit persistence, rotation, permissions)"
+    },
+    "secret_audit": {
+      "client_source": "PASS",
+      "client_bundle": "PASS",
+      "public_assets": "PASS",
+      "sdk": "PASS",
+      "git_repo_files": "PASS",
+      "forbidden_endpoints": "PASS (/api/secrets, /api/env, /api/config absent; admin metadata routes cookie-gated and value-free)",
+      "finding": "One synthetic invalid-format credential string exists inside tests/authz.test.ts by design (not a real secret)."
+    },
+    "vercel": {
+      "compatible": "READY (source tree committed 2026-09-23 — see source_committed)",
+      "source_committed": "FIXED 2026-09-23 — before the fix the Git repository contained ONLY the deployment ZIP archive. Vercel therefore detected no framework, built a static empty deployment and served Vercel platform-level `404: NOT_FOUND` on every path, including /api/health. See VERCEL-404-FORENSIC-REPORT.md.",
+      "framework": "nextjs (auto-detected)",
+      "build_command": "next build (default)",
+      "install_command": "npm install (default)",
+      "output": ".next (default)",
+      "runtime": "nodejs on all 19 API routes",
+      "regions": ["bom1"],
+      "max_duration_seconds": 60,
+      "crons": "NOT APPLICABLE",
+      "websockets": "NOT APPLICABLE",
+      "background_workers": "NOT APPLICABLE",
+      "filesystem_writes": "NOT APPLICABLE (stateless code; all state in Postgres)",
+      "long_running_processes": "NOT APPLICABLE",
+      "required_code_changes": []
+    },
+    "origin_configuration": {
+      "hardcoded_origins": "PASS (none)",
+      "cookies": "PASS (host-only, SameSite=Strict, Secure in production — works on any assigned domain with no config)",
+      "cors": "NOT APPLICABLE (server-to-server API + same-origin dashboard)",
+      "post_deploy_url_entries": "Only in CLIENT apps: the Kryptos base URL (e.g. https://<deployment>.vercel.app) is configured in Maholla's own config / KryptosClient baseUrl. Nothing in the Kryptos codebase needs the final URL."
+    },
+    "admin_bootstrap": {
+      "no_embedded_master_password": "PASS",
+      "no_default_credential": "PASS (all three ADMIN_* vars required; login returns 503 admin_not_configured otherwise)",
+      "brute_force_protection": "PASS (5 failures/5min/IP -> 429, uniform delay)",
+      "admin_session": "HMAC-signed HttpOnly SameSite=Strict cookie, 8h expiry, logout invalidates client-side",
+      "rotation": "Change ADMIN_PASSWORD (+ ADMIN_SESSION_SECRET to invalidate sessions) in Vercel; no client rebuilds"
+    },
+    "architecture": {
+      "secret_registry_metadata_only": "PASS",
+      "capability_registry": "PASS",
+      "server_only_resolver": "PASS",
+      "no_raw_secrets_in_db": "PASS",
+      "capability_authorization": "PASS (clients cannot select secrets/providers/adapters; hopping blocked; steering rejected)",
+      "http_generic_restrictions": "PASS (https-only, approved origins, private/loopback/metadata blocked at registration AND execution, secret injected only per config)"
+    }
+  },
+  "operator_actions": [
+    "Create/import the GitHub repo in Vercel (framework: Next.js — auto-detected).",
+    "Provision Postgres (Vercel Postgres/Neon/Supabase) and set DATABASE_URL in Vercel Environment Variables (Production scope).",
+    "Set the remaining Production env vars: ADMIN_USERNAME, ADMIN_PASSWORD (long random), ADMIN_SESSION_SECRET (openssl rand -hex 32), CREDENTIAL_PEPPER (recommended), GEMINI_API_KEY, GROQ_API_KEY, any future secrets.",
+    "Deploy the main branch (vercel --prod or Git integration).",
+    "One-time: run `DATABASE_URL=... npm run db:init` against the production database (applies 001 + 002, idempotent).",
+    "Open https://<production-domain>/admin and sign in with the admin env credentials.",
+    "In Secrets tab: verify GEMINI_API_KEY/GROQ_API_KEY show CONFIGURED (register metadata for any new secrets).",
+    "In Capabilities tab: confirm built-ins; optionally create ai.generate (gemini/generateText/GEMINI_API_KEY).",
+    "Create app MAHOLLA (dashboard or `npm run seed`), grant gemini.generate/ai.generate with limits; store the shown-once credential securely.",
+    "Configure Maholla with the Kryptos production URL + its credential (never in the APK binary).",
+    "Run production smoke tests: /api/health, execute round-trip, 401/403/429 behavior."
+  ],
+  "final_status": "READY WITH OPERATOR ACTION"
+}
