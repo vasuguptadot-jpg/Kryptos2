@@ -2,12 +2,23 @@ import { randomUUID } from "node:crypto";
 import { getAdapter } from "./adapters/registry";
 import { ProviderHttpError } from "./adapters/types";
 import { authenticateRequest, findPermission, hashClientIp } from "./auth";
+import { diagnosticFromCaught } from "./db-diagnostics";
 import { json, jsonError } from "./http";
 import { recordFailureAndCheck } from "./limiter";
 import { logger } from "./logger";
 import { resolveSecretForCapability } from "./resolver";
 import { getStore } from "./store";
 import type { AuditEvent } from "./types";
+
+function logStoreFailure(event: string, requestId: string, err: unknown): void {
+  const diag = diagnosticFromCaught(err);
+  logger.error(event, {
+    requestId,
+    diagnostic: diag.code,
+    reason: diag.reason,
+    tlsVerification: diag.tlsVerification
+  });
+}
 
 export const MAX_BODY_BYTES = 64 * 1024; // 64 KiB hard cap
 
@@ -32,10 +43,7 @@ async function record(
     } as AuditEvent);
     logger.info("request", event as Record<string, unknown>);
   } catch (err) {
-    logger.error("audit_write_failed", {
-      requestId: event.requestId,
-      error: err instanceof Error ? err.message : "unknown"
-    });
+    logStoreFailure("audit_write_failed", event.requestId, err);
   }
 }
 
@@ -139,7 +147,8 @@ async function runCapability(
   let store;
   try {
     store = getStore();
-  } catch {
+  } catch (err) {
+    logStoreFailure("rate_limit_store_unavailable", requestId, err);
     return finish(
       jsonError(503, "rate_limit_unavailable", "Service unavailable", requestId),
       "failure",
@@ -157,7 +166,8 @@ async function runCapability(
     if (Math.random() < 0.05) {
       store.pruneRateLimits(new Date(now.getTime() - 10 * 60 * 1000)).catch(() => undefined);
     }
-  } catch {
+  } catch (err) {
+    logStoreFailure("rate_limit_increment_failed", requestId, err);
     return finish(
       jsonError(503, "rate_limit_unavailable", "Service unavailable", requestId),
       "failure",
@@ -188,7 +198,8 @@ async function runCapability(
   let cap;
   try {
     cap = await store.getCapability(capability);
-  } catch {
+  } catch (err) {
+    logStoreFailure("capability_lookup_failed", requestId, err);
     return finish(
       jsonError(503, "configuration_unavailable", "Service unavailable", requestId, rateHeaders),
       "failure",

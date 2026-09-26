@@ -1,4 +1,6 @@
 import { Pool } from "pg";
+import { classifyDbError, sanitizeDbErrorMessage, tlsVerificationMode } from "./db-diagnostics";
+import { logger } from "./logger";
 import type {
   ApplicationRecord,
   AppStatus,
@@ -13,6 +15,23 @@ import type {
 } from "./types";
 
 /**
+ * SSL config for the pg Pool. TLS verification stays enforced unless the
+ * operator explicitly set PGSSLMODE=disable (local development only).
+ * Never sets rejectUnauthorized: false.
+ */
+export function postgresSslConfig(): { rejectUnauthorized: true } | undefined {
+  return process.env.PGSSLMODE === "disable" ? undefined : { rejectUnauthorized: true };
+}
+
+function logPostgresFailure(event: string, err: unknown): void {
+  logger.error(event, {
+    diagnostic: classifyDbError(err),
+    reason: sanitizeDbErrorMessage(err),
+    tlsVerification: tlsVerificationMode()
+  });
+}
+
+/**
  * Postgres-backed Store. Works with Vercel Postgres, Neon or Supabase
  * (any DATABASE_URL). Stores metadata only — never provider secrets.
  */
@@ -25,15 +44,20 @@ export class PostgresStore implements Store {
       max: 3,
       idleTimeoutMillis: 10_000,
       connectionTimeoutMillis: 5_000,
-      ssl:
-        process.env.PGSSLMODE === "disable"
-          ? undefined
-          : { rejectUnauthorized: true }
+      ssl: postgresSslConfig()
+    });
+    this.pool.on("error", (err) => {
+      logPostgresFailure("postgres_pool_error", err);
     });
   }
 
   async ping(): Promise<void> {
-    await this.pool.query("SELECT 1");
+    try {
+      await this.pool.query("SELECT 1");
+    } catch (err) {
+      logPostgresFailure("postgres_ping_failed", err);
+      throw err;
+    }
   }
 
   async getApplicationByAppId(appId: string): Promise<ApplicationRecord | null> {
