@@ -1,3 +1,4 @@
+import type { DbDiagnosticCode } from "./db-diagnostics";
 import { MemoryStore } from "./store-memory";
 import { PostgresStore } from "./store-postgres";
 import type { Store } from "./types";
@@ -9,9 +10,12 @@ const GLOBAL_KEY = "__kryptos_store__";
 const globalCache = globalThis as unknown as { [GLOBAL_KEY]?: Store | null };
 
 export class StoreUnavailableError extends Error {
-  constructor(message: string) {
+  readonly diagnosticCode: DbDiagnosticCode;
+
+  constructor(message: string, diagnosticCode: DbDiagnosticCode = "unknown") {
     super(message);
     this.name = "StoreUnavailableError";
+    this.diagnosticCode = diagnosticCode;
   }
 }
 
@@ -29,7 +33,8 @@ export function getStore(): Store {
   if (backend === "memory") {
     if ((process.env.NODE_ENV ?? "development") === "production") {
       throw new StoreUnavailableError(
-        "memory store backend is not permitted in production (fail closed)"
+        "memory store backend is not permitted in production (fail closed)",
+        "memory_backend"
       );
     }
     // Constructor pre-registers built-in metadata synchronously (dev/test).
@@ -39,7 +44,7 @@ export function getStore(): Store {
   }
   const url = process.env.DATABASE_URL;
   if (!url) {
-    throw new StoreUnavailableError("DATABASE_URL is not configured (fail closed)");
+    throw new StoreUnavailableError("DATABASE_URL is not configured (fail closed)", "not_configured");
   }
   globalCache[GLOBAL_KEY] = new PostgresStore(url);
   return globalCache[GLOBAL_KEY]!;
