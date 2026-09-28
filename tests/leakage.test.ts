@@ -116,7 +116,7 @@ describe("secret non-leakage", () => {
     const registryNames = (await ctx.store.listSecrets()).map((s) => s.secretName);
     const infraNames = [
       "DATABASE_URL", "ADMIN_PASSWORD", "ADMIN_SESSION_SECRET", "CREDENTIAL_PEPPER",
-      "SUPABASE_SERVICE_ROLE_KEY", "VAPID_PRIVATE_KEY"
+      "DATABASE_CA_CERT", "SUPABASE_SERVICE_ROLE_KEY", "VAPID_PRIVATE_KEY"
     ];
     const denyNames = [...registryNames, ...infraNames];
     const secretValues = [SYNTHETIC_GEMINI_KEY, SYNTHETIC_GROQ_KEY];
@@ -142,6 +142,8 @@ describe("secret non-leakage", () => {
       for (const name of denyNames) {
         assert.ok(!content.includes(name), `secret env name "${name}" found in client bundle: ${file}`);
       }
+      assert.ok(!content.includes("-----BEGIN CERTIFICATE-----"), `PEM certificate found in client bundle: ${file}`);
+      assert.ok(!content.includes("-----BEGIN PRIVATE KEY-----"), `PEM private key found in client bundle: ${file}`);
     }
   });
 });

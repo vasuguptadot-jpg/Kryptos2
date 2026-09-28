@@ -21,6 +21,7 @@ export const DB_DIAGNOSTIC_CODES = [
   "connection_refused",
   "network_unreachable",
   "database_missing",
+  "schema_failure",
   "unknown"
 ] as const;
 
@@ -59,11 +60,10 @@ export function isDbDiagnosticCode(value: unknown): value is DbDiagnosticCode {
 }
 
 /**
- * Matches PostgresStore: TLS verification is enforced unless the operator
- * explicitly set PGSSLMODE=disable (local development only).
+ * PostgreSQL TLS verification is always enforced by the pool configuration.
  */
 export function tlsVerificationMode(): "enforced" | "disabled" {
-  return process.env.PGSSLMODE === "disable" ? "disabled" : "enforced";
+  return "enforced";
 }
 
 export function isTlsVerificationEnforced(): boolean {
@@ -94,6 +94,8 @@ export function safeReason(code: DbDiagnosticCode): string {
       return "database network unreachable";
     case "database_missing":
       return "specified database does not exist";
+    case "schema_failure":
+      return "database schema is unavailable";
     default:
       return "database unreachable";
   }
@@ -153,6 +155,7 @@ const DNS_MESSAGE = /enotfound|eai_again|getaddrinfo|dns/i;
 const REFUSED_MESSAGE = /econnrefused|connection refused/i;
 const UNREACHABLE_MESSAGE = /enetunreach|ehostunreach|network unreachable/i;
 const MISSING_DB_MESSAGE = /database .* does not exist|3d000/i;
+const SCHEMA_MESSAGE = /3f000|42p01|schema .* does not exist|relation .* does not exist/i;
 
 function errorCode(err: unknown): string {
   if (err && typeof err === "object" && "code" in err) {
@@ -196,12 +199,14 @@ export function classifyDbError(err: unknown): DbDiagnosticCode {
   // PostgreSQL SQLSTATE.
   if (code === "28P01" || code === "28000") return "auth_failure";
   if (code === "3D000") return "database_missing";
+  if (code === "3F000" || code === "42P01") return "schema_failure";
 
   if (TIMEOUT_MESSAGE.test(msg) || msg === "timeout") return "timeout";
   if (DNS_MESSAGE.test(msg)) return "dns_failure";
   if (REFUSED_MESSAGE.test(msg)) return "connection_refused";
   if (UNREACHABLE_MESSAGE.test(msg)) return "network_unreachable";
   if (MISSING_DB_MESSAGE.test(msg)) return "database_missing";
+  if (SCHEMA_MESSAGE.test(msg)) return "schema_failure";
   // pg_hba "no SSL" / certificate failures before generic auth.
   if (/pg_hba/i.test(msg) && /ssl|tls|cert/i.test(msg)) return "tls_failure";
   if (AUTH_MESSAGE.test(msg)) return "auth_failure";

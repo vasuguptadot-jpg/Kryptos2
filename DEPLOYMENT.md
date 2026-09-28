@@ -61,6 +61,7 @@ Every PASS below was actually executed on 2026-09-22 (PostgreSQL 17.11 local ins
 | Variable | Purpose | Server/Client | Required | Suggested Vercel scope |
 |---|---|---|---|---|
 | `DATABASE_URL` | Postgres connection (metadata DB) | SERVER ONLY | YES | Production (Preview optional) |
+| `DATABASE_CA_CERT` | Optional PEM-encoded PostgreSQL CA trust anchor | SERVER ONLY | No; system trust store is used when absent | Production (and Preview when applicable) |
 | `ADMIN_USERNAME` | Admin login username | SERVER ONLY | YES | Production |
 | `ADMIN_PASSWORD` | Admin login password (long random) | SERVER ONLY | YES | Production |
 | `ADMIN_SESSION_SECRET` | HMAC key for admin session cookies (`openssl rand -hex 32`) | SERVER ONLY | YES | Production |
@@ -72,10 +73,11 @@ Every PASS below was actually executed on 2026-09-22 (PostgreSQL 17.11 local ins
 | `APP_DEFAULT_RATE_LIMIT` | Default per-app per-minute limit | SERVER ONLY | No | Production |
 | `PROVIDER_TIMEOUT_MS` | Upstream timeout | SERVER ONLY | No | Production |
 | `APP_VERSION` | Version string in `/api/health` | SERVER ONLY | No | All |
-| `PGSSLMODE` | `disable` for local DBs only | SERVER ONLY | No — not for Vercel | Development |
 | _`MY_*` future secrets_ | Any new provider secret — registered via dashboard, resolved dynamically | SERVER ONLY | As added | Production |
 
 Client applications receive ONLY: `KRYPTOS_BASE_URL`, their `X-Kryptos-App-Id`, their `X-Kryptos-App-Key`, capability names. No `VITE_*`/`NEXT_PUBLIC_*` secrets exist or are needed.
+
+PostgreSQL connections always use TLS with certificate and hostname verification. If Supabase's chain is not in the Node system trust store, set `DATABASE_CA_CERT` to its PEM CA certificate in Vercel. Missing CA uses system trust without weakening verification; empty or malformed CA and unsafe TLS overrides fail closed. Do not set `PGSSLMODE=disable` or `NODE_TLS_REJECT_UNAUTHORIZED=0`.
 
 **After Vercel assigns the deployment URL, nothing in this repo must change.** The URL is entered only in the client apps (e.g. Maholla's config / `KryptosClient.baseUrl`) and used to reach `https://<deployment>/admin`.
 

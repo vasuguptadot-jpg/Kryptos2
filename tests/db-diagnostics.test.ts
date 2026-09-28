@@ -9,7 +9,7 @@ import {
   sanitizeDbErrorMessage,
   tlsVerificationMode
 } from "../src/lib/db-diagnostics";
-import { postgresSslConfig } from "../src/lib/store-postgres";
+import { postgresTlsConfig } from "../src/lib/postgres-tls";
 import { StoreUnavailableError, getStore, resetStoreForTests } from "../src/lib/store";
 
 const SECRET_URL =
@@ -124,26 +124,27 @@ describe("database diagnostics", () => {
     assert.ok(sanitized.includes("[REDACTED]"));
   });
 
-  it("enforces TLS verification by default and only disables it for PGSSLMODE=disable", async () => {
-    await withEnv({ PGSSLMODE: undefined }, () => {
+  it("enforces TLS verification and rejects disabled PGSSLMODE", async () => {
+    await withEnv({ PGSSLMODE: undefined, DATABASE_CA_CERT: undefined }, () => {
       assert.equal(tlsVerificationMode(), "enforced");
       assert.equal(isTlsVerificationEnforced(), true);
-      assert.deepEqual(postgresSslConfig(), { rejectUnauthorized: true });
+      assert.deepEqual(postgresTlsConfig(), { rejectUnauthorized: true });
     });
     await withEnv({ PGSSLMODE: "require" }, () => {
-      assert.deepEqual(postgresSslConfig(), { rejectUnauthorized: true });
+      assert.deepEqual(postgresTlsConfig(), { rejectUnauthorized: true });
       assert.equal(tlsVerificationMode(), "enforced");
     });
     await withEnv({ PGSSLMODE: "disable" }, () => {
-      assert.equal(postgresSslConfig(), undefined);
-      assert.equal(tlsVerificationMode(), "disabled");
-      assert.equal(isTlsVerificationEnforced(), false);
+      assert.throws(() => postgresTlsConfig(), /postgres_tls_unsafe_configuration/);
+      assert.equal(tlsVerificationMode(), "enforced");
+      assert.equal(isTlsVerificationEnforced(), true);
     });
   });
 
-  it("never sets rejectUnauthorized to false", () => {
-    const ssl = postgresSslConfig();
-    if (ssl) assert.equal(ssl.rejectUnauthorized, true);
+  it("rejects process-wide disabling of Node TLS verification", async () => {
+    await withEnv({ NODE_TLS_REJECT_UNAUTHORIZED: "0", DATABASE_CA_CERT: undefined }, () => {
+      assert.throws(() => postgresTlsConfig(), /postgres_tls_unsafe_configuration/);
+    });
   });
 
   it("tags StoreUnavailableError as not_configured when DATABASE_URL is missing", async () => {

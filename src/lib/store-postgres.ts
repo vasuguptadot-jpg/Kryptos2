@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import { classifyDbError, sanitizeDbErrorMessage, tlsVerificationMode } from "./db-diagnostics";
 import { logger } from "./logger";
+import { postgresPoolConfig } from "./postgres-tls";
 import type {
   ApplicationRecord,
   AppStatus,
@@ -13,15 +14,6 @@ import type {
   Store,
   StoreStats
 } from "./types";
-
-/**
- * SSL config for the pg Pool. TLS verification stays enforced unless the
- * operator explicitly set PGSSLMODE=disable (local development only).
- * Never sets rejectUnauthorized: false.
- */
-export function postgresSslConfig(): { rejectUnauthorized: true } | undefined {
-  return process.env.PGSSLMODE === "disable" ? undefined : { rejectUnauthorized: true };
-}
 
 function logPostgresFailure(event: string, err: unknown): void {
   logger.error(event, {
@@ -39,13 +31,7 @@ export class PostgresStore implements Store {
   private pool: Pool;
 
   constructor(connectionString: string) {
-    this.pool = new Pool({
-      connectionString,
-      max: 3,
-      idleTimeoutMillis: 10_000,
-      connectionTimeoutMillis: 5_000,
-      ssl: postgresSslConfig()
-    });
+    this.pool = new Pool(postgresPoolConfig(connectionString));
     this.pool.on("error", (err) => {
       logPostgresFailure("postgres_pool_error", err);
     });
