@@ -1,7 +1,7 @@
 {
   "project": "kryptos-broker",
   "version": "1.0.0",
-  "generated": "2026-09-22",
+  "generated": "2026-09-28",
   "states": {
     "database": {
       "db_init": "PASS",
@@ -19,9 +19,13 @@
       "lint_note": "No linter is configured in this repository; not claimed as executed. tsc --strict covers compile-time correctness.",
       "build": "PASS",
       "tests": "PASS",
-      "tests_count": "42/42",
+      "tests_count": "74/74",
       "security_tests": "PASS",
       "secret_scan": "PASS",
+      "postgres_tls": "PASS (TLS and hostname verification enforced; unsafe TLS settings rejected; synthetic CA tests only)",
+      "postgres_tls_production_verification": "PENDING (no production CA configured and no production database connection attempted)",
+      "migration_execution_for_tls_change": "NOT RUN",
+      "production_dependency_audit": "3 vulnerabilities (1 moderate, 2 high); no dependency upgrades applied",
       "postgres_store_runtime": "PASS (production next start + real PostgreSQL 17: atomic rate limits, audit persistence, rotation, permissions)"
     },
     "secret_audit": {
@@ -73,7 +77,7 @@
   },
   "operator_actions": [
     "Create/import the GitHub repo in Vercel (framework: Next.js — auto-detected).",
-    "Provision Postgres (Vercel Postgres/Neon/Supabase) and set DATABASE_URL in Vercel Environment Variables (Production scope).",
+    "Provision Postgres (Vercel Postgres/Neon/Supabase) and set DATABASE_URL in Vercel Environment Variables (Production scope). If required, set DATABASE_CA_CERT to the PEM-encoded Supabase PostgreSQL CA; TLS certificate and hostname verification remain enabled without it.",
     "Set the remaining Production env vars: ADMIN_USERNAME, ADMIN_PASSWORD (long random), ADMIN_SESSION_SECRET (openssl rand -hex 32), CREDENTIAL_PEPPER (recommended), GEMINI_API_KEY, GROQ_API_KEY, any future secrets.",
     "Deploy the main branch (vercel --prod or Git integration).",
     "One-time: run `DATABASE_URL=... npm run db:init` against the production database (applies 001 + 002, idempotent).",

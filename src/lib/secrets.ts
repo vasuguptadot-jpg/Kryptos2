@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 /** Infrastructure secrets that always exist outside the registry. */
 const INFRA_SECRET_NAMES: readonly string[] = [
   "DATABASE_URL",
+  "DATABASE_CA_CERT",
   "ADMIN_PASSWORD",
   "ADMIN_SESSION_SECRET",
   "CREDENTIAL_PEPPER",

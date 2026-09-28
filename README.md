@@ -80,7 +80,7 @@ Set in `.env` (dev only): `GEMINI_API_KEY`, `GROQ_API_KEY`, `ADMIN_*`. See `.env
 
 ## Production (Vercel)
 
-1. Provision Postgres (Vercel Postgres / Neon / Supabase) → set `DATABASE_URL` → `npm run db:init`.
+1. Provision Postgres (Vercel Postgres / Neon / Supabase) → set `DATABASE_URL` and, if needed, the PEM-encoded `DATABASE_CA_CERT` → `npm run db:init`.
 2. Set server env vars (Settings → Environment Variables): `ADMIN_USERNAME`, strong `ADMIN_PASSWORD`,
    `ADMIN_SESSION_SECRET` (`openssl rand -hex 32`), provider keys (`GEMINI_API_KEY`, `GROQ_API_KEY`, and
    any future `MY_*` secrets), recommended `CREDENTIAL_PEPPER`. **Never `NEXT_PUBLIC_*`. Never set `STORE_BACKEND`.**
@@ -89,6 +89,8 @@ Set in `.env` (dev only): `GEMINI_API_KEY`, `GROQ_API_KEY`, `ADMIN_*`. See `.env
 
 **PUBLIC (client) config for an app:** base URL, `X-Kryptos-App-Id`, `X-Kryptos-App-Key`, capability names.
 **PRIVATE (server) config:** everything above — and nothing private ever crosses the wire.
+
+PostgreSQL TLS certificate and hostname verification are always enabled. `DATABASE_CA_CERT` is optional: when absent, Node's system trust store is used. Malformed/empty CA values and unsafe TLS modes are rejected; never set `PGSSLMODE=disable` or `NODE_TLS_REJECT_UNAUTHORIZED=0`. Do not commit the CA or place it in a client-prefixed variable.
 
 ## Onboarding (exact procedure)
 
@@ -113,7 +115,7 @@ Repeat for `TRADE_LAB`, `LEGAL_AI`, … — independent credentials, permissions
 New weather/maps/payments/etc. providers: register secret metadata + an `http-generic` capability
 (approved origin), grant apps — no code changes.
 
-## Tests (42)
+## Tests (74)
 
 Secret protection (bundle scan of `.next/static` for registered names+values, response/header/error
 leaks incl. provider-echoed keys, dynamic redaction of arbitrary secret names) · authorization
@@ -121,7 +123,7 @@ leaks incl. provider-echoed keys, dynamic redaction of arbitrary secret names) �
 steering, input steering, unknown/disabled states, missing env) · SSRF (config-time + execution-time
 host validation, no client routes for secrets/env) · abuse (per-app/per-capability limits + 429s,
 admin login throttle, payload caps, malformed bodies) · SDK contract against the real pipeline.
-Run: `npm run verify`.
+PostgreSQL TLS tests use only a synthetic CA; certificate and hostname verification remain enabled, with optional `DATABASE_CA_CERT` trust configured server-side. Run: `npm run verify`.
 
 ## Honest limitations (V1)
 
