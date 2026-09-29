@@ -15,7 +15,9 @@ export const DB_DIAGNOSTIC_CODES = [
   "memory_backend",
   "invalid_url",
   "invalid_ca_cert",
+  "unsafe_tls_config",
   "tls_failure",
+  "tcp_failure",
   "auth_failure",
   "timeout",
   "dns_failure",
@@ -23,6 +25,7 @@ export const DB_DIAGNOSTIC_CODES = [
   "network_unreachable",
   "database_missing",
   "schema_failure",
+  "database_unreachable",
   "unknown"
 ] as const;
 
@@ -83,8 +86,12 @@ export function safeReason(code: DbDiagnosticCode): string {
       return "DATABASE_URL is present but is not a valid postgres URL";
     case "invalid_ca_cert":
       return "configured CA certificate is invalid";
+    case "unsafe_tls_config":
+      return "unsafe TLS configuration was rejected";
     case "tls_failure":
       return "TLS certificate verification failed (verification remains enforced)";
+    case "tcp_failure":
+      return "database TCP connection failed";
     case "auth_failure":
       return "database authentication failed";
     case "timeout":
@@ -99,6 +106,8 @@ export function safeReason(code: DbDiagnosticCode): string {
       return "specified database does not exist";
     case "schema_failure":
       return "database schema is unavailable";
+    case "database_unreachable":
+      return "database unreachable";
     default:
       return "database unreachable";
   }
@@ -181,15 +190,19 @@ function errorMessage(err: unknown): string {
 
 export function classifyDbError(err: unknown): DbDiagnosticCode {
   const code = errorCode(err);
-  const msg = errorMessage(err);
+  const msg = errorMessage(err).replace(/postgres(?:ql)?:\/\/\S+/gi, "");
 
-  if (msg === "database_ca_cert_invalid") return "invalid_ca_cert";
+  if (/database_ca_cert_invalid/.test(msg)) return "invalid_ca_cert";
+  if (/postgres_tls_unsafe_configuration/.test(msg)) return "unsafe_tls_config";
 
   // Node network / TLS codes.
   if (code === "ENOTFOUND" || code === "EAI_AGAIN") return "dns_failure";
   if (code === "ECONNREFUSED") return "connection_refused";
   if (code === "ETIMEDOUT" || code === "ETIME") return "timeout";
   if (code === "ENETUNREACH" || code === "EHOSTUNREACH") return "network_unreachable";
+  if (code === "ECONNRESET" || code === "ECONNABORTED" || code === "EPIPE" || code === "ECONNCLOSED") {
+    return "tcp_failure";
+  }
   if (
     code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" ||
     code === "DEPTH_ZERO_SELF_SIGNED_CERT" ||
@@ -210,6 +223,9 @@ export function classifyDbError(err: unknown): DbDiagnosticCode {
   if (DNS_MESSAGE.test(msg)) return "dns_failure";
   if (REFUSED_MESSAGE.test(msg)) return "connection_refused";
   if (UNREACHABLE_MESSAGE.test(msg)) return "network_unreachable";
+  if (/socket hang up|connection reset|broken pipe|connection terminated unexpectedly/i.test(msg)) {
+    return "tcp_failure";
+  }
   if (MISSING_DB_MESSAGE.test(msg)) return "database_missing";
   if (SCHEMA_MESSAGE.test(msg)) return "schema_failure";
   // pg_hba "no SSL" / certificate failures before generic auth.
@@ -217,7 +233,7 @@ export function classifyDbError(err: unknown): DbDiagnosticCode {
   if (AUTH_MESSAGE.test(msg)) return "auth_failure";
   if (TLS_MESSAGE.test(msg)) return "tls_failure";
 
-  return "unknown";
+  return "database_unreachable";
 }
 
 const POSTGRES_URL_RE = /postgres(?:ql)?:\/\/\S+/gi;
