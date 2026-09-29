@@ -6,8 +6,10 @@ import {
   diagnosticFromCaught,
   inspectConnectionString,
   isTlsVerificationEnforced,
+  safeReason,
   sanitizeDbErrorMessage,
-  tlsVerificationMode
+  tlsVerificationMode,
+  type DbDiagnosticCode
 } from "../src/lib/db-diagnostics";
 import { postgresTlsConfig } from "../src/lib/postgres-tls";
 import { StoreUnavailableError, getStore, resetStoreForTests } from "../src/lib/store";
@@ -210,5 +212,62 @@ describe("database diagnostics", () => {
       assert.ok(!text.includes("postgres://"));
       assert.ok(!text.toLowerCase().includes("password"));
     });
+  });
+
+  it("health maps PostgreSQL failures to safe diagnostic classifications", async () => {
+    const errorDetails = [
+      SECRET_URL,
+      "MIIDOTCC_CA_PRIVATE_MATERIAL",
+      "RAW_POSTGRES_ERROR_MARKER"
+    ];
+    const detail = errorDetails.join(" ");
+    const cases: Array<{ code: DbDiagnosticCode; error: Error }> = [
+      { code: "invalid_ca_cert", error: new Error(`database_ca_cert_invalid ${detail}`) },
+      { code: "unsafe_tls_config", error: new Error(`postgres_tls_unsafe_configuration ${detail}`) },
+      {
+        code: "tls_failure",
+        error: Object.assign(new Error(`certificate verification failed ${detail}`), {
+          code: "ERR_TLS_CERT_ALTNAME_INVALID"
+        })
+      },
+      {
+        code: "tcp_failure",
+        error: Object.assign(new Error(`socket reset ${detail}`), { code: "ECONNRESET" })
+      },
+      {
+        code: "schema_failure",
+        error: Object.assign(new Error(`schema unavailable ${detail}`), { code: "3F000" })
+      },
+      { code: "database_unreachable", error: new Error(`unclassified failure ${detail}`) }
+    ];
+
+    await withEnv(
+      { STORE_BACKEND: "postgres", DATABASE_URL: SECRET_URL, PGSSLMODE: undefined },
+      async () => {
+        for (const { code, error } of cases) {
+          resetStoreForTests({
+            ping: async () => {
+              throw error;
+            },
+            listCapabilities: async () => []
+          } as never);
+
+          const res = await healthGET();
+          assert.equal(res.status, 200);
+          const text = await res.text();
+          const body = JSON.parse(text) as {
+            database: string;
+            databaseDiagnostic: { code: string; tlsVerification: string; reason: string };
+          };
+          assert.equal(body.database, "unavailable");
+          assert.equal(body.databaseDiagnostic.code, code);
+          assert.equal(body.databaseDiagnostic.tlsVerification, "enforced");
+          assert.equal(body.databaseDiagnostic.reason, safeReason(code));
+          for (const secretOrRawDetail of errorDetails) {
+            assert.ok(!text.includes(secretOrRawDetail));
+          }
+        }
+      }
+    );
   });
 });
