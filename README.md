@@ -90,7 +90,7 @@ Set in `.env` (dev only): `GEMINI_API_KEY`, `GROQ_API_KEY`, `ADMIN_*`. See `.env
 **PUBLIC (client) config for an app:** base URL, `X-Kryptos-App-Id`, `X-Kryptos-App-Key`, capability names.
 **PRIVATE (server) config:** everything above — and nothing private ever crosses the wire.
 
-PostgreSQL TLS certificate and hostname verification are always enabled. `DATABASE_CA_CERT` is optional: when absent, Node's system trust store is used. Malformed/empty CA values and unsafe TLS modes are rejected; never set `PGSSLMODE=disable` or `NODE_TLS_REJECT_UNAUTHORIZED=0`. Do not commit the CA or place it in a client-prefixed variable.
+PostgreSQL TLS certificate and hostname verification are always enabled. `DATABASE_CA_CERT` is optional: when absent, Node's system trust store is used. Actual PEM newlines are preferred; literal `\n` or `\r\n` line separators from an environment-variable UI are narrowly normalized. Malformed/empty CA values and unsafe TLS modes are rejected; never set `PGSSLMODE=disable` or `NODE_TLS_REJECT_UNAUTHORIZED=0`. Do not commit the CA or place it in a client-prefixed variable.
 
 ## Onboarding (exact procedure)
 

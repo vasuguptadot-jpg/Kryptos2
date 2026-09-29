@@ -11,6 +11,12 @@ const CERTIFICATE_BLOCK_RE = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIF
 const UNSAFE_SSL_MODES = new Set(["disable", "no-verify", "allow", "prefer"]);
 const ACCEPTED_SSL_MODES = new Set(["require", "verify-ca", "verify-full"]);
 type Environment = Readonly<Record<string, string | undefined>>;
+type CaCertificateRepresentation = "pem" | "escaped_newlines" | "whitespace_normalized";
+
+export type CaCertificateDiagnostic =
+  | { status: "missing" }
+  | { status: "valid"; representation: CaCertificateRepresentation }
+  | { status: "malformed"; representation: CaCertificateRepresentation };
 
 function assertSafeTlsEnvironment(env: Environment): void {
   if (env.NODE_TLS_REJECT_UNAUTHORIZED === "0") {
@@ -23,23 +29,55 @@ function assertSafeTlsEnvironment(env: Environment): void {
   }
 }
 
-function validateCaCertificate(value: string): string {
-  const ca = value.trim();
-  if (!ca) throw new Error("database_ca_cert_invalid");
+function normalizeCaCertificate(value: string): {
+  ca: string;
+  representation: CaCertificateRepresentation;
+} {
+  const escapedNewlines = /(?:\\r)?\\n/.test(value);
+  const ca = (escapedNewlines ? value.replace(/(?:\\r)?\\n/g, "\n") : value).trim();
+  const hasWhitespaceNormalization =
+    /^[ \t]/.test(value) ||
+    /[ \t]$/.test(value) ||
+    /\r\n/.test(value) ||
+    /\n[ \t]+/.test(value);
+  return {
+    ca,
+    representation: escapedNewlines
+      ? "escaped_newlines"
+      : hasWhitespaceNormalization
+        ? "whitespace_normalized"
+        : "pem"
+  };
+}
 
+function parseCaCertificate(ca: string): boolean {
+  if (!ca) return false;
   const blocks = ca.match(CERTIFICATE_BLOCK_RE) ?? [];
   const remainder = ca.replace(CERTIFICATE_BLOCK_RE, "").trim();
-  if (blocks.length === 0 || remainder.length > 0) {
-    throw new Error("database_ca_cert_invalid");
-  }
+  if (blocks.length === 0 || remainder.length > 0) return false;
 
   try {
     for (const block of blocks) {
-      if (!new X509Certificate(block).ca) throw new Error("not_ca");
+      if (!new X509Certificate(block).ca) return false;
     }
   } catch {
-    throw new Error("database_ca_cert_invalid");
+    return false;
   }
+  return true;
+}
+
+export function diagnoseCaCertificate(value: string | undefined): CaCertificateDiagnostic {
+  if (value === undefined) return { status: "missing" };
+  const { ca, representation } = normalizeCaCertificate(value);
+  return {
+    status: parseCaCertificate(ca) ? "valid" : "malformed",
+    representation
+  };
+}
+
+function validateCaCertificate(value: string): string {
+  const { ca } = normalizeCaCertificate(value);
+  if (!parseCaCertificate(ca)) throw new Error("database_ca_cert_invalid");
 
   noteResolvedSecret("DATABASE_CA_CERT", ca);
   return ca;

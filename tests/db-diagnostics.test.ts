@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { X509Certificate } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { GET as healthGET } from "../src/app/api/health/route";
 import {
@@ -16,6 +19,7 @@ import { StoreUnavailableError, getStore, resetStoreForTests } from "../src/lib/
 
 const SECRET_URL =
   "postgres://kryptos_user:p%40ssw0rd-SECRET@db.internal.example:5432/kryptos?sslmode=require";
+const SUPABASE_ROOT_2021_CA = readFileSync(join(__dirname, "fixtures", "supabase-root-2021-ca.crt"), "utf8").trim();
 
 function withEnv(overrides: Record<string, string | undefined>, fn: () => void | Promise<void>): Promise<void> {
   const prev: Record<string, string | undefined> = {};
@@ -84,6 +88,17 @@ describe("database diagnostics", () => {
       classifyDbError(Object.assign(new Error("unable to verify the first certificate"), { code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE" })),
       "tls_failure"
     );
+  });
+
+  it("classifies an invalid configured CA without exposing its value", () => {
+    const err = new Error("database_ca_cert_invalid");
+    assert.equal(classifyDbError(err), "invalid_ca_cert");
+    return withEnv({ DATABASE_URL: SECRET_URL }, () => {
+      const diag = diagnosticFromCaught(err);
+      assert.equal(diag.code, "invalid_ca_cert");
+      assert.equal(diag.reason, "configured CA certificate is invalid");
+      assert.equal(diag.tlsVerification, "enforced");
+    });
   });
 
   it("classifies authentication failures", () => {
@@ -212,6 +227,58 @@ describe("database diagnostics", () => {
       assert.ok(!text.includes("postgres://"));
       assert.ok(!text.toLowerCase().includes("password"));
     });
+  });
+
+  it("health reports malformed CA diagnostics without exposing certificate material", async () => {
+    const malformedCa = "-----BEGIN CERTIFICATE-----malformed-and-private-----END CERTIFICATE-----";
+    await withEnv(
+      {
+        STORE_BACKEND: "postgres",
+        DATABASE_URL: SECRET_URL,
+        DATABASE_CA_CERT: malformedCa,
+        NODE_TLS_REJECT_UNAUTHORIZED: undefined,
+        PGSSLMODE: undefined
+      },
+      async () => {
+        const res = await healthGET();
+        const text = await res.text();
+        const body = JSON.parse(text) as {
+          databaseDiagnostic: { code: string; tlsVerification: string; reason: string };
+        };
+        assert.equal(body.databaseDiagnostic.code, "invalid_ca_cert");
+        assert.equal(body.databaseDiagnostic.tlsVerification, "enforced");
+        assert.equal(body.databaseDiagnostic.reason, "configured CA certificate is invalid");
+        assert.ok(!text.includes(malformedCa));
+        assert.ok(!text.includes("BEGIN CERTIFICATE"));
+      }
+    );
+  });
+
+  it("health never returns the configured CA or its fingerprint", async () => {
+    await withEnv(
+      {
+        STORE_BACKEND: "postgres",
+        DATABASE_URL: SECRET_URL,
+        DATABASE_CA_CERT: SUPABASE_ROOT_2021_CA,
+        NODE_TLS_REJECT_UNAUTHORIZED: undefined,
+        PGSSLMODE: undefined
+      },
+      async () => {
+        resetStoreForTests({
+          ping: async () => {
+            throw Object.assign(new Error("connect ENOTFOUND"), { code: "ENOTFOUND" });
+          },
+          listCapabilities: async () => []
+        } as never);
+
+        const response = await healthGET();
+        const body = await response.text();
+        const fingerprint = new X509Certificate(SUPABASE_ROOT_2021_CA).fingerprint256;
+        assert.ok(!body.includes(SUPABASE_ROOT_2021_CA));
+        assert.ok(!body.includes(fingerprint));
+        assert.ok(!body.includes("BEGIN CERTIFICATE"));
+      }
+    );
   });
 
   it("health maps PostgreSQL failures to safe diagnostic classifications", async () => {

@@ -119,7 +119,8 @@ describe("secret non-leakage", () => {
       "DATABASE_CA_CERT", "SUPABASE_SERVICE_ROLE_KEY", "VAPID_PRIVATE_KEY"
     ];
     const denyNames = [...registryNames, ...infraNames];
-    const secretValues = [SYNTHETIC_GEMINI_KEY, SYNTHETIC_GROQ_KEY];
+    const supabaseCa = readFileSync(join(__dirname, "fixtures", "supabase-root-2021-ca.crt"), "utf8").trim();
+    const secretValues = [SYNTHETIC_GEMINI_KEY, SYNTHETIC_GROQ_KEY, supabaseCa];
     for (const name of denyNames) {
       const v = process.env[name];
       if (v && v.length >= 8) secretValues.push(v);
