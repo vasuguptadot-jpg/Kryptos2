@@ -34,10 +34,17 @@ export async function GET(): Promise<Response> {
 
   try {
     const store = getStore();
-    await Promise.race([
-      store.ping(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000))
-    ]);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        store.ping(),
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("timeout")), 3000);
+        })
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
     db = "ok";
     databaseDiagnostic = okDiagnostic();
     const capabilities = await store.listCapabilities();
@@ -63,7 +70,7 @@ export async function GET(): Promise<Response> {
     databaseDiagnostic: {
       code: databaseDiagnostic.code,
       tlsVerification: databaseDiagnostic.tlsVerification,
-      reason: databaseDiagnostic.reason
+      reason: safeReason(databaseDiagnostic.code)
     },
     providers,
     capabilities: capabilityCount
