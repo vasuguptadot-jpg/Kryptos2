@@ -14,6 +14,7 @@ export const DB_DIAGNOSTIC_CODES = [
   "not_configured",
   "memory_backend",
   "invalid_url",
+  "invalid_ca_cert",
   "tls_failure",
   "auth_failure",
   "timeout",
@@ -80,6 +81,8 @@ export function safeReason(code: DbDiagnosticCode): string {
       return "memory store backend is not permitted in production";
     case "invalid_url":
       return "DATABASE_URL is present but is not a valid postgres URL";
+    case "invalid_ca_cert":
+      return "configured CA certificate is invalid";
     case "tls_failure":
       return "TLS certificate verification failed (verification remains enforced)";
     case "auth_failure":
@@ -179,6 +182,8 @@ function errorMessage(err: unknown): string {
 export function classifyDbError(err: unknown): DbDiagnosticCode {
   const code = errorCode(err);
   const msg = errorMessage(err);
+
+  if (msg === "database_ca_cert_invalid") return "invalid_ca_cert";
 
   // Node network / TLS codes.
   if (code === "ENOTFOUND" || code === "EAI_AGAIN") return "dns_failure";

@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { X509Certificate } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { classifyDbError, sanitizeDbErrorMessage } from "../src/lib/db-diagnostics";
 import { logger } from "../src/lib/logger";
-import { postgresPoolConfig, postgresTlsConfig } from "../src/lib/postgres-tls";
+import { diagnoseCaCertificate, postgresPoolConfig, postgresTlsConfig } from "../src/lib/postgres-tls";
 
+const SUPABASE_ROOT_2021_CA = readFileSync(join(__dirname, "fixtures", "supabase-root-2021-ca.crt"), "utf8").trim();
 const SYNTHETIC_CA = `-----BEGIN CERTIFICATE-----
 MIIDOTCCAiGgAwIBAgIUa1jLaGbdyJXqG/NI+MMggdFuqvEwDQYJKoZIhvcNAQEL
 BQAwJDEiMCAGA1UEAwwZS3J5cHRvcyBTeW50aGV0aWMgVGVzdCBDQTAeFw0yNjA5
@@ -51,6 +55,75 @@ describe("verified PostgreSQL TLS configuration", () => {
 
   it("uses system trust when the CA is missing", () => {
     assert.deepEqual(postgresTlsConfig(SAFE_ENV), { rejectUnauthorized: true });
+    assert.deepEqual(diagnoseCaCertificate(undefined), { status: "missing" });
+  });
+
+  it("parses the exact Supabase Root 2021 CA PEM", () => {
+    const certificate = new X509Certificate(SUPABASE_ROOT_2021_CA);
+    assert.equal(certificate.subject.includes("CN=Supabase Root 2021 CA"), true);
+    assert.equal(certificate.ca, true);
+    assert.deepEqual(diagnoseCaCertificate(SUPABASE_ROOT_2021_CA), {
+      status: "valid",
+      representation: "pem"
+    });
+    assert.deepEqual(postgresTlsConfig({ DATABASE_CA_CERT: SUPABASE_ROOT_2021_CA }), {
+      rejectUnauthorized: true,
+      ca: SUPABASE_ROOT_2021_CA
+    });
+  });
+
+  it("normalizes only literal escaped newline sequences in the CA environment value", () => {
+    const escapedCa = SUPABASE_ROOT_2021_CA.replace(/\n/g, "\\n");
+    assert.deepEqual(diagnoseCaCertificate(escapedCa), {
+      status: "valid",
+      representation: "escaped_newlines"
+    });
+    assert.deepEqual(postgresTlsConfig({ DATABASE_CA_CERT: escapedCa }), {
+      rejectUnauthorized: true,
+      ca: SUPABASE_ROOT_2021_CA
+    });
+    const previous = {
+      ca: process.env.DATABASE_CA_CERT,
+      nodeTls: process.env.NODE_TLS_REJECT_UNAUTHORIZED,
+      sslMode: process.env.PGSSLMODE
+    };
+    process.env.DATABASE_CA_CERT = escapedCa;
+    delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+    delete process.env.PGSSLMODE;
+    try {
+      assert.deepEqual(postgresTlsConfig(), {
+        rejectUnauthorized: true,
+        ca: SUPABASE_ROOT_2021_CA
+      });
+    } finally {
+      if (previous.ca === undefined) delete process.env.DATABASE_CA_CERT;
+      else process.env.DATABASE_CA_CERT = previous.ca;
+      if (previous.nodeTls === undefined) delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+      else process.env.NODE_TLS_REJECT_UNAUTHORIZED = previous.nodeTls;
+      if (previous.sslMode === undefined) delete process.env.PGSSLMODE;
+      else process.env.PGSSLMODE = previous.sslMode;
+    }
+  });
+
+  it("accepts whitespace-normalized PEM while identifying that input format", () => {
+    const normalizedCa = ` \t\n${SUPABASE_ROOT_2021_CA}\n \t`;
+    assert.deepEqual(diagnoseCaCertificate(normalizedCa), {
+      status: "valid",
+      representation: "whitespace_normalized"
+    });
+    assert.deepEqual(postgresTlsConfig({ DATABASE_CA_CERT: normalizedCa }), {
+      rejectUnauthorized: true,
+      ca: SUPABASE_ROOT_2021_CA
+    });
+  });
+
+  it("diagnoses malformed CA material without returning its contents", () => {
+    const malformed = "not a certificate";
+    assert.deepEqual(diagnoseCaCertificate(malformed), {
+      status: "malformed",
+      representation: "pem"
+    });
+    assert.throws(() => postgresTlsConfig({ DATABASE_CA_CERT: malformed }), /database_ca_cert_invalid/);
   });
 
   it("rejects malformed CA material", () => {
@@ -104,6 +177,12 @@ describe("verified PostgreSQL TLS configuration", () => {
     assert.equal(Object.hasOwn(ssl, "checkServerIdentity"), false);
   });
 
+  it("keeps TLS verification enabled with the Supabase root CA", () => {
+    const ssl = postgresTlsConfig({ DATABASE_CA_CERT: SUPABASE_ROOT_2021_CA });
+    assert.equal(ssl.rejectUnauthorized, true);
+    assert.equal(Object.hasOwn(ssl, "checkServerIdentity"), false);
+  });
+
   it("passes the configured CA to PostgreSQL TLS options", () => {
     const config = postgresPoolConfig(DATABASE_URL, { DATABASE_CA_CERT: SYNTHETIC_CA });
     assert.deepEqual(config.ssl, { rejectUnauthorized: true, ca: SYNTHETIC_CA });
@@ -119,6 +198,25 @@ describe("verified PostgreSQL TLS configuration", () => {
     );
     assert.ok(!output.includes(SYNTHETIC_CA));
     assert.ok(!output.includes("BEGIN CERTIFICATE"));
+  });
+
+  it("never writes the Supabase CA PEM to logs", () => {
+    const original = process.env.DATABASE_CA_CERT;
+    process.env.DATABASE_CA_CERT = SUPABASE_ROOT_2021_CA;
+    try {
+      const output = captureErrorLog(() =>
+        logger.error("postgres_ping_failed", {
+          reason: sanitizeDbErrorMessage(new Error(SUPABASE_ROOT_2021_CA)),
+          tlsVerification: "enforced"
+        })
+      );
+      assert.ok(!output.includes(SUPABASE_ROOT_2021_CA));
+      assert.ok(!output.includes("BEGIN CERTIFICATE"));
+      assert.ok(!output.includes("80:70:25:AD"));
+    } finally {
+      if (original === undefined) delete process.env.DATABASE_CA_CERT;
+      else process.env.DATABASE_CA_CERT = original;
+    }
   });
 
   it("never writes DATABASE_URL to logs", () => {

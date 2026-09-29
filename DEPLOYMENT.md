@@ -77,7 +77,7 @@ Every PASS below was actually executed on 2026-09-22 (PostgreSQL 17.11 local ins
 
 Client applications receive ONLY: `KRYPTOS_BASE_URL`, their `X-Kryptos-App-Id`, their `X-Kryptos-App-Key`, capability names. No `VITE_*`/`NEXT_PUBLIC_*` secrets exist or are needed.
 
-PostgreSQL connections always use TLS with certificate and hostname verification. If Supabase's chain is not in the Node system trust store, set `DATABASE_CA_CERT` to its PEM CA certificate in Vercel. Missing CA uses system trust without weakening verification; empty or malformed CA and unsafe TLS overrides fail closed. Do not set `PGSSLMODE=disable` or `NODE_TLS_REJECT_UNAUTHORIZED=0`.
+PostgreSQL connections always use TLS with certificate and hostname verification. If Supabase's chain is not in the Node system trust store, set `DATABASE_CA_CERT` to its PEM CA certificate in Vercel. Actual PEM newlines are preferred; the server narrowly converts only literal `\n` or `\r\n` line separators to newlines for environment-variable UIs. Missing CA uses system trust without weakening verification; empty or malformed CA and unsafe TLS overrides fail closed. Do not set `PGSSLMODE=disable` or `NODE_TLS_REJECT_UNAUTHORIZED=0`.
 
 **After Vercel assigns the deployment URL, nothing in this repo must change.** The URL is entered only in the client apps (e.g. Maholla's config / `KryptosClient.baseUrl`) and used to reach `https://<deployment>/admin`.
 
