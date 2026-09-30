@@ -27,6 +27,25 @@ export interface CaCertificateFormatDiagnostic {
   leadingWhitespace: boolean;
   trailingWhitespace: boolean;
   parserAccepted: boolean;
+  pemEnvelopeValid: boolean;
+  base64Decodable: boolean;
+  derStructureValid: boolean;
+  derLength: number | null;
+  x509Parsable: boolean;
+  nativeX509Accepted: boolean;
+  certificateType: "x509_certificate" | "non_x509_der" | "unparsed";
+  validityFieldsParsable: boolean;
+  basicConstraintsPresent: boolean;
+  basicConstraintsIndicatesCA: boolean;
+  appearsToBeCertificate: boolean;
+  certificateClassification:
+    | "missing"
+    | "invalid_pem_envelope"
+    | "invalid_base64"
+    | "invalid_der"
+    | "not_x509_certificate"
+    | "not_ca_certificate"
+    | "ca_certificate";
   classification:
     | "missing"
     | "empty"
@@ -75,18 +94,22 @@ function normalizeCaCertificate(value: string): {
   };
 }
 
+function parseX509Certificate(value: string | Buffer): X509Certificate | null {
+  try {
+    return new X509Certificate(value);
+  } catch {
+    return null;
+  }
+}
+
 function parseCaCertificate(ca: string): boolean {
   if (!ca) return false;
   const blocks = ca.match(CERTIFICATE_BLOCK_RE) ?? [];
   const remainder = ca.replace(CERTIFICATE_BLOCK_RE, "").trim();
   if (blocks.length === 0 || remainder.length > 0) return false;
 
-  try {
-    for (const block of blocks) {
-      if (!new X509Certificate(block).ca) return false;
-    }
-  } catch {
-    return false;
+  for (const block of blocks) {
+    if (!parseX509Certificate(block)?.ca) return false;
   }
   return true;
 }
@@ -104,11 +127,157 @@ function countMatches(value: string, pattern: RegExp): number {
   return value.match(pattern)?.length ?? 0;
 }
 
+interface DerNode {
+  tagClass: number;
+  tagNumber: number;
+  contentStart: number;
+  contentEnd: number;
+  children: DerNode[];
+}
+
+function parseDerNode(
+  bytes: Buffer,
+  offset: number,
+  limit: number,
+  depth = 0
+): { node: DerNode; next: number } | null {
+  if (offset >= limit || depth > 64) return null;
+  let cursor = offset;
+  const firstTag = bytes[cursor++];
+  const tagClass = firstTag >> 6;
+  const constructed = (firstTag & 0x20) !== 0;
+  let tagNumber = firstTag & 0x1f;
+
+  if (tagNumber === 0x1f) {
+    tagNumber = 0;
+    let tagByte: number;
+    do {
+      if (cursor >= limit) return null;
+      tagByte = bytes[cursor++];
+      if (tagNumber === 0 && (tagByte & 0x7f) === 0) return null;
+      tagNumber = tagNumber * 128 + (tagByte & 0x7f);
+      if (!Number.isSafeInteger(tagNumber)) return null;
+    } while ((tagByte & 0x80) !== 0);
+  }
+
+  if (cursor >= limit) return null;
+  const firstLength = bytes[cursor++];
+  let contentLength: number;
+  if (firstLength < 0x80) {
+    contentLength = firstLength;
+  } else {
+    const lengthBytes = firstLength & 0x7f;
+    if (lengthBytes === 0 || lengthBytes > 6 || cursor + lengthBytes > limit || bytes[cursor] === 0) return null;
+    contentLength = 0;
+    for (let index = 0; index < lengthBytes; index += 1) {
+      contentLength = contentLength * 256 + bytes[cursor++];
+      if (!Number.isSafeInteger(contentLength)) return null;
+    }
+    if (contentLength < 0x80) return null;
+  }
+
+  const contentStart = cursor;
+  const contentEnd = contentStart + contentLength;
+  if (contentEnd > limit) return null;
+
+  const children: DerNode[] = [];
+  if (constructed) {
+    while (cursor < contentEnd) {
+      const child = parseDerNode(bytes, cursor, contentEnd, depth + 1);
+      if (!child) return null;
+      children.push(child.node);
+      cursor = child.next;
+    }
+    if (cursor !== contentEnd) return null;
+  }
+
+  return { node: { tagClass, tagNumber, contentStart, contentEnd, children }, next: contentEnd };
+}
+
+function parseDer(bytes: Buffer): DerNode | null {
+  const parsed = parseDerNode(bytes, 0, bytes.length);
+  return parsed?.next === bytes.length ? parsed.node : null;
+}
+
+function hasBasicConstraintsExtension(certificateNode: DerNode | null, bytes: Buffer): boolean {
+  const tbsCertificate = certificateNode?.children[0];
+  const extensions = tbsCertificate?.children.find((node) => node.tagClass === 2 && node.tagNumber === 3);
+  const extensionSequence = extensions?.children[0];
+  if (!extensionSequence) return false;
+
+  return extensionSequence.children.some((extension) => {
+    const oid = extension.children[0];
+    return (
+      oid?.tagClass === 0 &&
+      oid.tagNumber === 6 &&
+      bytes.subarray(oid.contentStart, oid.contentEnd).equals(Buffer.from([0x55, 0x1d, 0x13]))
+    );
+  });
+}
+
+function decodePemCertificate(block: string): Buffer | null {
+  const match = /^-----BEGIN CERTIFICATE-----\r?\n?([\s\S]*?)\r?\n?-----END CERTIFICATE-----$/.exec(block);
+  if (!match) return null;
+  const base64 = match[1].replace(/\s/g, "");
+  if (
+    !base64 ||
+    base64.length % 4 !== 0 ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64)
+  ) {
+    return null;
+  }
+
+  const der = Buffer.from(base64, "base64");
+  return der.toString("base64") === base64 ? der : null;
+}
+
 export function diagnoseCaCertificateFormat(value: string | undefined): CaCertificateFormatDiagnostic {
   const defined = value !== undefined;
   const raw = value ?? "";
   const normalized = defined ? normalizeCaCertificate(raw) : null;
+  const ca = normalized?.ca ?? "";
+  const blocks = ca.match(CERTIFICATE_BLOCK_RE) ?? [];
+  const remainder = ca.replace(CERTIFICATE_BLOCK_RE, "").trim();
+  const pemEnvelopeValid =
+    blocks.length > 0 &&
+    remainder.length === 0 &&
+    blocks.every((block) => /^-----BEGIN CERTIFICATE-----\r?\n?[\s\S]*?\r?\n?-----END CERTIFICATE-----$/.test(block));
+  const decoded = pemEnvelopeValid ? blocks.map(decodePemCertificate) : [];
+  const base64Decodable = decoded.length > 0 && decoded.every((der) => der !== null);
+  const derBuffers = base64Decodable ? (decoded as Buffer[]) : [];
+  const derNodes = derBuffers.map(parseDer);
+  const derStructureValid = derNodes.length > 0 && derNodes.every((node) => node !== null);
+  const certificates = derBuffers.map(parseX509Certificate);
+  const x509Parsable = certificates.length > 0 && certificates.every((certificate) => certificate !== null);
   const parserAccepted = normalized ? parseCaCertificate(normalized.ca) : false;
+  const parsedCertificates = certificates.filter((certificate): certificate is X509Certificate => certificate !== null);
+  const validityFieldsParsable =
+    parsedCertificates.length > 0 &&
+    parsedCertificates.every(
+      (certificate) =>
+        Number.isFinite(Date.parse(certificate.validFrom)) && Number.isFinite(Date.parse(certificate.validTo))
+    );
+  const basicConstraintsPresent =
+    x509Parsable && derNodes.every((node, index) => hasBasicConstraintsExtension(node, derBuffers[index]));
+  const basicConstraintsIndicatesCA = x509Parsable && parsedCertificates.every((certificate) => certificate.ca);
+  const certificateType: CaCertificateFormatDiagnostic["certificateType"] = x509Parsable
+    ? "x509_certificate"
+    : derStructureValid
+      ? "non_x509_der"
+      : "unparsed";
+  const certificateClassification: CaCertificateFormatDiagnostic["certificateClassification"] = !defined
+    ? "missing"
+    : !pemEnvelopeValid
+      ? "invalid_pem_envelope"
+      : !base64Decodable
+        ? "invalid_base64"
+        : !derStructureValid
+          ? "invalid_der"
+          : !x509Parsable
+            ? "not_x509_certificate"
+            : !basicConstraintsIndicatesCA
+              ? "not_ca_certificate"
+              : "ca_certificate";
   const doubleEscapedNewlines = countMatches(raw, /\\\\n/g);
   const escapedCarriageReturns = countMatches(raw, /\\r\\n/g);
   const escapedNewlines = countMatches(raw, /(?<!\\)(?<!\\r)\\n/g);
@@ -141,6 +310,18 @@ export function diagnoseCaCertificateFormat(value: string | undefined): CaCertif
     leadingWhitespace: /^\s/.test(raw),
     trailingWhitespace: /\s$/.test(raw),
     parserAccepted,
+    pemEnvelopeValid,
+    base64Decodable,
+    derStructureValid,
+    derLength: base64Decodable ? derBuffers.reduce((length, der) => length + der.length, 0) : null,
+    x509Parsable,
+    nativeX509Accepted: x509Parsable,
+    certificateType,
+    validityFieldsParsable,
+    basicConstraintsPresent,
+    basicConstraintsIndicatesCA,
+    appearsToBeCertificate: x509Parsable,
+    certificateClassification,
     classification
   };
 }

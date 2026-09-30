@@ -259,10 +259,25 @@ describe("database diagnostics", () => {
         assert.equal(body.databaseDiagnostic.caFormat.hasEndMarker, true);
         assert.equal(body.databaseDiagnostic.caFormat.pemBlockCount, 1);
         assert.equal(body.databaseDiagnostic.caFormat.parserAccepted, false);
+        assert.equal(body.databaseDiagnostic.caFormat.pemEnvelopeValid, true);
+        assert.equal(body.databaseDiagnostic.caFormat.base64Decodable, false);
+        assert.equal(body.databaseDiagnostic.caFormat.derStructureValid, false);
+        assert.equal(body.databaseDiagnostic.caFormat.x509Parsable, false);
+        assert.equal(body.databaseDiagnostic.caFormat.nativeX509Accepted, false);
+        assert.equal(body.databaseDiagnostic.caFormat.appearsToBeCertificate, false);
+        assert.equal(body.databaseDiagnostic.caFormat.certificateClassification, "invalid_base64");
         assert.equal(body.databaseDiagnostic.caFormat.classification, "malformed");
         assert.deepEqual(Object.keys(body.databaseDiagnostic.caFormat).sort(), [
           "actualNewlines",
+          "appearsToBeCertificate",
+          "basicConstraintsIndicatesCA",
+          "basicConstraintsPresent",
+          "base64Decodable",
+          "certificateType",
+          "certificateClassification",
           "classification",
+          "derLength",
+          "derStructureValid",
           "defined",
           "doubleEscapedNewlines",
           "escapedCarriageReturns",
@@ -271,14 +286,46 @@ describe("database diagnostics", () => {
           "hasEndMarker",
           "leadingWhitespace",
           "length",
+          "nativeX509Accepted",
           "parserAccepted",
+          "pemEnvelopeValid",
           "pemBlockCount",
           "surroundingQuotes",
-          "trailingWhitespace"
-        ]);
+          "trailingWhitespace",
+          "validityFieldsParsable",
+          "x509Parsable"
+        ].sort());
         assert.ok(!text.includes(malformedCa));
         assert.ok(!text.includes("BEGIN CERTIFICATE"));
         assert.ok(!/fingerprint|sha.?256|hash|subject|issuer|serial/i.test(text));
+      }
+    );
+  });
+
+  it("does not expose certificate metadata in healthy production responses", async () => {
+    await withEnv(
+      {
+        STORE_BACKEND: "postgres",
+        DATABASE_URL: SECRET_URL,
+        DATABASE_CA_CERT: "malformed-but-not-used",
+        NODE_TLS_REJECT_UNAUTHORIZED: undefined,
+        PGSSLMODE: undefined,
+        VERCEL_ENV: "production"
+      },
+      async () => {
+        resetStoreForTests({
+          ping: async () => undefined,
+          listCapabilities: async () => []
+        } as never);
+
+        const response = await healthGET();
+        const body = await response.json() as {
+          database: string;
+          databaseDiagnostic: { code: string; caFormat?: unknown };
+        };
+        assert.equal(body.database, "ok");
+        assert.equal(body.databaseDiagnostic.code, "ok");
+        assert.equal("caFormat" in body.databaseDiagnostic, false);
       }
     );
   });

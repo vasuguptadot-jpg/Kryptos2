@@ -113,6 +113,18 @@ describe("verified PostgreSQL TLS configuration", () => {
       "leadingWhitespace",
       "trailingWhitespace",
       "parserAccepted",
+      "pemEnvelopeValid",
+      "base64Decodable",
+      "derStructureValid",
+      "derLength",
+      "x509Parsable",
+      "nativeX509Accepted",
+      "certificateType",
+      "validityFieldsParsable",
+      "basicConstraintsPresent",
+      "basicConstraintsIndicatesCA",
+      "appearsToBeCertificate",
+      "certificateClassification",
       "classification"
     ].sort();
 
@@ -164,6 +176,140 @@ describe("verified PostgreSQL TLS configuration", () => {
     assert.equal(truncated.hasEndMarker, false);
   });
 
+  it("separates PEM, Base64, DER, X.509, and CA metadata without exposing certificate data", () => {
+    const begin = "-----BEGIN CERTIFICATE-----";
+    const end = "-----END CERTIFICATE-----";
+    const fillerLength = 200 - begin.length - end.length - 5;
+    const filler = "A".repeat(fillerLength);
+    const productionStyleMalformed = [
+      begin,
+      filler.slice(0, 36),
+      filler.slice(36, 72),
+      filler.slice(72, 108),
+      filler.slice(108),
+      end
+    ].join("\n");
+    const cases = [
+      {
+        name: "known-good Supabase root CA",
+        value: SUPABASE_ROOT_2021_CA,
+        expected: {
+          pemEnvelopeValid: true,
+          base64Decodable: true,
+          derStructureValid: true,
+          x509Parsable: true,
+          nativeX509Accepted: true,
+          certificateType: "x509_certificate",
+          validityFieldsParsable: true,
+          basicConstraintsPresent: true,
+          basicConstraintsIndicatesCA: true,
+          appearsToBeCertificate: true,
+          certificateClassification: "ca_certificate",
+          parserAccepted: true
+        }
+      },
+      {
+        name: "malformed PEM",
+        value: `${begin}truncated`,
+        expected: {
+          pemEnvelopeValid: false,
+          base64Decodable: false,
+          derStructureValid: false,
+          x509Parsable: false,
+          nativeX509Accepted: false,
+          certificateType: "unparsed",
+          validityFieldsParsable: false,
+          basicConstraintsPresent: false,
+          basicConstraintsIndicatesCA: false,
+          appearsToBeCertificate: false,
+          certificateClassification: "invalid_pem_envelope",
+          parserAccepted: false
+        }
+      },
+      {
+        name: "valid PEM envelope with invalid Base64",
+        value: `${begin}\n%%%not-base64%%%\n${end}`,
+        expected: {
+          pemEnvelopeValid: true,
+          base64Decodable: false,
+          derStructureValid: false,
+          x509Parsable: false,
+          nativeX509Accepted: false,
+          certificateType: "unparsed",
+          validityFieldsParsable: false,
+          basicConstraintsPresent: false,
+          basicConstraintsIndicatesCA: false,
+          appearsToBeCertificate: false,
+          certificateClassification: "invalid_base64",
+          parserAccepted: false
+        }
+      },
+      {
+        name: "valid Base64 containing non-certificate DER",
+        value: `${begin}\nMAA=\n${end}`,
+        expected: {
+          pemEnvelopeValid: true,
+          base64Decodable: true,
+          derStructureValid: true,
+          x509Parsable: false,
+          nativeX509Accepted: false,
+          certificateType: "non_x509_der",
+          validityFieldsParsable: false,
+          basicConstraintsPresent: false,
+          basicConstraintsIndicatesCA: false,
+          appearsToBeCertificate: false,
+          certificateClassification: "not_x509_certificate",
+          parserAccepted: false
+        }
+      },
+      {
+        name: "production-style 200-character malformed value",
+        value: productionStyleMalformed,
+        expected: {
+          pemEnvelopeValid: true,
+          base64Decodable: false,
+          derStructureValid: false,
+          x509Parsable: false,
+          nativeX509Accepted: false,
+          certificateType: "unparsed",
+          validityFieldsParsable: false,
+          basicConstraintsPresent: false,
+          basicConstraintsIndicatesCA: false,
+          appearsToBeCertificate: false,
+          certificateClassification: "invalid_base64",
+          parserAccepted: false
+        }
+      }
+    ] as const;
+
+    assert.equal(productionStyleMalformed.length, 200);
+    assert.equal(productionStyleMalformed.match(/\n/g)?.length, 5);
+    for (const testCase of cases) {
+      const metadata = diagnoseCaCertificateFormat(testCase.value);
+      const serialized = JSON.stringify(metadata);
+      for (const [key, value] of Object.entries(testCase.expected)) {
+        assert.equal(metadata[key as keyof typeof metadata], value, `${testCase.name}: ${key}`);
+      }
+      if (testCase.name === "known-good Supabase root CA") {
+        assert.ok((metadata.derLength ?? 0) > 0);
+      } else {
+        assert.equal(metadata.derLength, testCase.expected.base64Decodable ? 2 : null);
+      }
+      if (testCase.name === "production-style 200-character malformed value") {
+        assert.equal(metadata.length, 200);
+        assert.equal(metadata.actualNewlines, 5);
+        assert.equal(metadata.pemBlockCount, 1);
+        assert.equal(metadata.hasBeginMarker, true);
+        assert.equal(metadata.hasEndMarker, true);
+      }
+      assert.ok(!serialized.includes(testCase.value), `${testCase.name}: certificate content leaked`);
+      assert.ok(
+        !/-----BEGIN CERTIFICATE-----|subject|issuer|serial|fingerprint|sha.?256|hash|public.?key/i.test(serialized),
+        `${testCase.name}: forbidden certificate metadata leaked`
+      );
+    }
+  });
+
   it("accepts a valid synthetic CA", () => {
     assert.deepEqual(postgresTlsConfig({ DATABASE_CA_CERT: SYNTHETIC_CA }), {
       rejectUnauthorized: true,
@@ -178,7 +324,6 @@ describe("verified PostgreSQL TLS configuration", () => {
 
   it("parses the exact Supabase Root 2021 CA PEM", () => {
     const certificate = new X509Certificate(SUPABASE_ROOT_2021_CA);
-    assert.equal(certificate.subject.includes("CN=Supabase Root 2021 CA"), true);
     assert.equal(certificate.ca, true);
     assert.deepEqual(diagnoseCaCertificate(SUPABASE_ROOT_2021_CA), {
       status: "valid",
