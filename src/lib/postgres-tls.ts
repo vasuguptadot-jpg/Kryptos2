@@ -13,6 +13,31 @@ const ACCEPTED_SSL_MODES = new Set(["require", "verify-ca", "verify-full"]);
 type Environment = Readonly<Record<string, string | undefined>>;
 type CaCertificateRepresentation = "pem" | "escaped_newlines" | "whitespace_normalized";
 
+export interface CaCertificateFormatDiagnostic {
+  defined: boolean;
+  length: number | null;
+  actualNewlines: number;
+  escapedNewlines: number;
+  doubleEscapedNewlines: number;
+  escapedCarriageReturns: number;
+  hasBeginMarker: boolean;
+  hasEndMarker: boolean;
+  pemBlockCount: number;
+  surroundingQuotes: boolean;
+  leadingWhitespace: boolean;
+  trailingWhitespace: boolean;
+  parserAccepted: boolean;
+  classification:
+    | "missing"
+    | "empty"
+    | "pem"
+    | "escaped_newlines"
+    | "whitespace_normalized"
+    | "double_escaped_newlines"
+    | "quoted"
+    | "malformed";
+}
+
 export type CaCertificateDiagnostic =
   | { status: "missing" }
   | { status: "valid"; representation: CaCertificateRepresentation }
@@ -72,6 +97,51 @@ export function diagnoseCaCertificate(value: string | undefined): CaCertificateD
   return {
     status: parseCaCertificate(ca) ? "valid" : "malformed",
     representation
+  };
+}
+
+function countMatches(value: string, pattern: RegExp): number {
+  return value.match(pattern)?.length ?? 0;
+}
+
+export function diagnoseCaCertificateFormat(value: string | undefined): CaCertificateFormatDiagnostic {
+  const defined = value !== undefined;
+  const raw = value ?? "";
+  const normalized = defined ? normalizeCaCertificate(raw) : null;
+  const parserAccepted = normalized ? parseCaCertificate(normalized.ca) : false;
+  const doubleEscapedNewlines = countMatches(raw, /\\\\n/g);
+  const escapedCarriageReturns = countMatches(raw, /\\r\\n/g);
+  const escapedNewlines = countMatches(raw, /(?<!\\)(?<!\\r)\\n/g);
+  const surroundingQuotes =
+    raw.length >= 2 &&
+    ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'")));
+  const classification: CaCertificateFormatDiagnostic["classification"] = !defined
+    ? "missing"
+    : raw.length === 0
+      ? "empty"
+      : surroundingQuotes
+        ? "quoted"
+        : doubleEscapedNewlines > 0
+          ? "double_escaped_newlines"
+          : parserAccepted && normalized
+            ? normalized.representation
+            : "malformed";
+
+  return {
+    defined,
+    length: defined ? raw.length : null,
+    actualNewlines: countMatches(raw, /\n/g),
+    escapedNewlines,
+    doubleEscapedNewlines,
+    escapedCarriageReturns,
+    hasBeginMarker: raw.includes("-----BEGIN CERTIFICATE-----"),
+    hasEndMarker: raw.includes("-----END CERTIFICATE-----"),
+    pemBlockCount: normalized ? normalized.ca.match(CERTIFICATE_BLOCK_RE)?.length ?? 0 : 0,
+    surroundingQuotes,
+    leadingWhitespace: /^\s/.test(raw),
+    trailingWhitespace: /\s$/.test(raw),
+    parserAccepted,
+    classification
   };
 }
 

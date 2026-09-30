@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { classifyDbError, sanitizeDbErrorMessage } from "../src/lib/db-diagnostics";
 import { logger } from "../src/lib/logger";
-import { diagnoseCaCertificate, postgresPoolConfig, postgresTlsConfig } from "../src/lib/postgres-tls";
+import {
+  diagnoseCaCertificate,
+  diagnoseCaCertificateFormat,
+  postgresPoolConfig,
+  postgresTlsConfig
+} from "../src/lib/postgres-tls";
 
 const SUPABASE_ROOT_2021_CA = readFileSync(join(__dirname, "fixtures", "supabase-root-2021-ca.crt"), "utf8").trim();
 const SYNTHETIC_CA = `-----BEGIN CERTIFICATE-----
@@ -46,6 +51,119 @@ function captureErrorLog(callback: () => void): string {
 }
 
 describe("verified PostgreSQL TLS configuration", () => {
+  it("reports only safe CA format metadata using the connection parser", () => {
+    const cases = [
+      { name: "undefined CA", value: undefined, classification: "missing", accepted: false },
+      { name: "empty CA", value: "", classification: "empty", accepted: false },
+      { name: "valid PEM", value: SUPABASE_ROOT_2021_CA, classification: "pem", accepted: true },
+      {
+        name: "literal newline escapes",
+        value: SUPABASE_ROOT_2021_CA.replace(/\n/g, "\\n"),
+        classification: "escaped_newlines",
+        accepted: true
+      },
+      {
+        name: "CRLF",
+        value: SUPABASE_ROOT_2021_CA.replace(/\n/g, "\r\n"),
+        classification: "whitespace_normalized",
+        accepted: true
+      },
+      {
+        name: "surrounding whitespace",
+        value: ` \t\n${SUPABASE_ROOT_2021_CA}\n \t`,
+        classification: "whitespace_normalized",
+        accepted: true
+      },
+      {
+        name: "surrounding quotes",
+        value: `"${SUPABASE_ROOT_2021_CA}"`,
+        classification: "quoted",
+        accepted: false
+      },
+      {
+        name: "double-escaped newlines",
+        value: SUPABASE_ROOT_2021_CA.replace(/\n/g, "\\\\n"),
+        classification: "double_escaped_newlines",
+        accepted: false
+      },
+      {
+        name: "malformed PEM",
+        value: "-----BEGIN CERTIFICATE-----PRIVATE_DIAGNOSTIC_MARKER-----END CERTIFICATE-----",
+        classification: "malformed",
+        accepted: false
+      },
+      {
+        name: "truncated PEM",
+        value: "-----BEGIN CERTIFICATE-----PRIVATE_DIAGNOSTIC_MARKER",
+        classification: "malformed",
+        accepted: false
+      }
+    ] as const;
+    const allowedKeys = [
+      "defined",
+      "length",
+      "actualNewlines",
+      "escapedNewlines",
+      "doubleEscapedNewlines",
+      "escapedCarriageReturns",
+      "hasBeginMarker",
+      "hasEndMarker",
+      "pemBlockCount",
+      "surroundingQuotes",
+      "leadingWhitespace",
+      "trailingWhitespace",
+      "parserAccepted",
+      "classification"
+    ].sort();
+
+    for (const testCase of cases) {
+      const metadata = diagnoseCaCertificateFormat(testCase.value);
+      const serialized = JSON.stringify(metadata);
+      assert.deepEqual(Object.keys(metadata).sort(), allowedKeys, testCase.name);
+      assert.equal(metadata.classification, testCase.classification, testCase.name);
+      assert.equal(metadata.parserAccepted, testCase.accepted, testCase.name);
+      assert.equal(
+        metadata.parserAccepted,
+        testCase.value === undefined
+          ? false
+          : (() => {
+              try {
+                postgresTlsConfig({ DATABASE_CA_CERT: testCase.value });
+                return true;
+              } catch {
+                return false;
+              }
+            })(),
+        `${testCase.name} parser behavior`
+      );
+      assert.ok(!serialized.includes(SUPABASE_ROOT_2021_CA), `${testCase.name} exposed certificate contents`);
+      assert.ok(!serialized.includes("PRIVATE_DIAGNOSTIC_MARKER"), `${testCase.name} exposed a secret marker`);
+      assert.ok(!/fingerprint|sha.?256|hash|subject|issuer|serial/i.test(serialized), `${testCase.name} exposed forbidden metadata`);
+    }
+
+    const missing = diagnoseCaCertificateFormat(undefined);
+    assert.equal(missing.defined, false);
+    assert.equal(missing.length, null);
+    const empty = diagnoseCaCertificateFormat("");
+    assert.equal(empty.defined, true);
+    assert.equal(empty.length, 0);
+    const escaped = diagnoseCaCertificateFormat(SUPABASE_ROOT_2021_CA.replace(/\n/g, "\\n"));
+    assert.ok(escaped.escapedNewlines > 0);
+    const crlf = diagnoseCaCertificateFormat(SUPABASE_ROOT_2021_CA.replace(/\n/g, "\r\n"));
+    assert.ok(crlf.actualNewlines > 0);
+    assert.equal(crlf.escapedCarriageReturns, 0);
+    const doubleEscaped = diagnoseCaCertificateFormat(SUPABASE_ROOT_2021_CA.replace(/\n/g, "\\\\n"));
+    assert.ok(doubleEscaped.doubleEscapedNewlines > 0);
+    const quotes = diagnoseCaCertificateFormat(`"${SUPABASE_ROOT_2021_CA}"`);
+    assert.equal(quotes.surroundingQuotes, true);
+    const whitespace = diagnoseCaCertificateFormat(` ${SUPABASE_ROOT_2021_CA} `);
+    assert.equal(whitespace.leadingWhitespace, true);
+    assert.equal(whitespace.trailingWhitespace, true);
+    const truncated = diagnoseCaCertificateFormat("-----BEGIN CERTIFICATE-----truncated");
+    assert.equal(truncated.hasBeginMarker, true);
+    assert.equal(truncated.hasEndMarker, false);
+  });
+
   it("accepts a valid synthetic CA", () => {
     assert.deepEqual(postgresTlsConfig({ DATABASE_CA_CERT: SYNTHETIC_CA }), {
       rejectUnauthorized: true,
