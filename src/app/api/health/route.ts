@@ -8,6 +8,7 @@ import {
 import { json } from "@/lib/http";
 import { isSecretConfigured } from "@/lib/secrets";
 import { getStore } from "@/lib/store";
+import { diagnoseCaCertificateFormat } from "@/lib/postgres-tls";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -70,7 +71,10 @@ export async function GET(): Promise<Response> {
     databaseDiagnostic: {
       code: databaseDiagnostic.code,
       tlsVerification: databaseDiagnostic.tlsVerification,
-      reason: safeReason(databaseDiagnostic.code)
+      reason: safeReason(databaseDiagnostic.code),
+      ...(process.env.VERCEL_ENV === "production" && databaseDiagnostic.code === "invalid_ca_cert"
+        ? { caFormat: diagnoseCaCertificateFormat(process.env.DATABASE_CA_CERT) }
+        : {})
     },
     providers,
     capabilities: capabilityCount

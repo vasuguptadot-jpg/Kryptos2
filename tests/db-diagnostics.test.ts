@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { X509Certificate } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -237,24 +236,75 @@ describe("database diagnostics", () => {
         DATABASE_URL: SECRET_URL,
         DATABASE_CA_CERT: malformedCa,
         NODE_TLS_REJECT_UNAUTHORIZED: undefined,
-        PGSSLMODE: undefined
+        PGSSLMODE: undefined,
+        VERCEL_ENV: "production"
       },
       async () => {
         const res = await healthGET();
         const text = await res.text();
         const body = JSON.parse(text) as {
-          databaseDiagnostic: { code: string; tlsVerification: string; reason: string };
+          databaseDiagnostic: {
+            code: string;
+            tlsVerification: string;
+            reason: string;
+            caFormat: Record<string, unknown>;
+          };
         };
         assert.equal(body.databaseDiagnostic.code, "invalid_ca_cert");
         assert.equal(body.databaseDiagnostic.tlsVerification, "enforced");
         assert.equal(body.databaseDiagnostic.reason, "configured CA certificate is invalid");
+        assert.equal(body.databaseDiagnostic.caFormat.defined, true);
+        assert.equal(body.databaseDiagnostic.caFormat.length, malformedCa.length);
+        assert.equal(body.databaseDiagnostic.caFormat.hasBeginMarker, true);
+        assert.equal(body.databaseDiagnostic.caFormat.hasEndMarker, true);
+        assert.equal(body.databaseDiagnostic.caFormat.pemBlockCount, 1);
+        assert.equal(body.databaseDiagnostic.caFormat.parserAccepted, false);
+        assert.equal(body.databaseDiagnostic.caFormat.classification, "malformed");
+        assert.deepEqual(Object.keys(body.databaseDiagnostic.caFormat).sort(), [
+          "actualNewlines",
+          "classification",
+          "defined",
+          "doubleEscapedNewlines",
+          "escapedCarriageReturns",
+          "escapedNewlines",
+          "hasBeginMarker",
+          "hasEndMarker",
+          "leadingWhitespace",
+          "length",
+          "parserAccepted",
+          "pemBlockCount",
+          "surroundingQuotes",
+          "trailingWhitespace"
+        ]);
         assert.ok(!text.includes(malformedCa));
         assert.ok(!text.includes("BEGIN CERTIFICATE"));
+        assert.ok(!/fingerprint|sha.?256|hash|subject|issuer|serial/i.test(text));
       }
     );
   });
 
-  it("health never returns the configured CA or its fingerprint", async () => {
+  it("does not expose temporary CA metadata outside Vercel Production", async () => {
+    await withEnv(
+      {
+        STORE_BACKEND: "postgres",
+        DATABASE_URL: SECRET_URL,
+        DATABASE_CA_CERT: "not-a-certificate",
+        NODE_TLS_REJECT_UNAUTHORIZED: undefined,
+        PGSSLMODE: undefined,
+        VERCEL_ENV: "preview"
+      },
+      async () => {
+        const response = await healthGET();
+        const body = await response.json() as {
+          databaseDiagnostic: { code: string; caFormat?: unknown };
+        };
+        assert.equal(body.databaseDiagnostic.code, "invalid_ca_cert");
+        assert.equal("caFormat" in body.databaseDiagnostic, false);
+      }
+    );
+  });
+
+  it("health never returns the configured CA or fingerprint/hash metadata", async () => {
     await withEnv(
       {
         STORE_BACKEND: "postgres",
@@ -273,10 +323,9 @@ describe("database diagnostics", () => {
 
         const response = await healthGET();
         const body = await response.text();
-        const fingerprint = new X509Certificate(SUPABASE_ROOT_2021_CA).fingerprint256;
         assert.ok(!body.includes(SUPABASE_ROOT_2021_CA));
-        assert.ok(!body.includes(fingerprint));
         assert.ok(!body.includes("BEGIN CERTIFICATE"));
+        assert.ok(!/fingerprint|sha.?256|hash/i.test(body));
       }
     );
   });
