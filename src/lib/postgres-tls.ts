@@ -8,6 +8,25 @@ export interface PostgresTlsConfig {
 }
 
 const CERTIFICATE_BLOCK_RE = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;
+const KNOWN_GOOD_CONTROL_PROFILE = {
+  pemBlockCount: 1,
+  base64Length: 1292,
+  payloadLineCount: 21,
+  asciiCharacterCount: 1312,
+  nonAsciiCharacterCount: 0,
+  whitespaceCharacterCount: 20,
+  spaceCount: 0,
+  tabCount: 0,
+  carriageReturnCount: 0,
+  lineFeedCount: 20,
+  plusCount: 11,
+  slashCount: 14,
+  paddingCharacterCount: 1,
+  unexpectedCharacterCount: 0,
+  lengthModulo4: 0,
+  paddingAtEnd: true,
+  paddingStructureValid: true
+} as const;
 const UNSAFE_SSL_MODES = new Set(["disable", "no-verify", "allow", "prefer"]);
 const ACCEPTED_SSL_MODES = new Set(["require", "verify-ca", "verify-full"]);
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -29,6 +48,43 @@ export interface CaCertificateFormatDiagnostic {
   parserAccepted: boolean;
   pemEnvelopeValid: boolean;
   base64Decodable: boolean;
+  base64Length: number | null;
+  payloadLineCount: number;
+  payloadLineLengthsPlausible: boolean;
+  emptyPayloadLineCount: number;
+  asciiCharacterCount: number;
+  nonAsciiCharacterCount: number;
+  environmentNonAsciiCharacterCount: number;
+  whitespaceCharacterCount: number;
+  spaceCount: number;
+  tabCount: number;
+  carriageReturnCount: number;
+  lineFeedCount: number;
+  plusCount: number;
+  slashCount: number;
+  paddingCharacterCount: number;
+  unexpectedCharacterCount: number;
+  unexpectedCharacterClasses: Array<"non_ascii" | "whitespace" | "invalid_base64_symbol">;
+  alphabetValid: boolean;
+  lengthModulo4: number | null;
+  paddingAtEnd: boolean;
+  paddingStructureValid: boolean;
+  paddingBeforeFinalCharacters: boolean;
+  possibleTruncation: boolean;
+  impossibleBase64Length: boolean;
+  unicodeWhitespaceCount: number;
+  unicodeDashLikeCount: number;
+  unicodeQuoteCount: number;
+  bomPresent: boolean;
+  controlCharacterCount: number;
+  zeroWidthCharacterCount: number;
+  knownGoodControlComparison: {
+    samePemBlockCount: boolean;
+    sameBase64Length: boolean;
+    samePayloadLineCount: boolean;
+    sameCharacterClassDistribution: boolean;
+    samePaddingStructure: boolean;
+  };
   derStructureValid: boolean;
   derLength: number | null;
   x509Parsable: boolean;
@@ -78,10 +134,13 @@ function normalizeCaCertificate(value: string): {
   representation: CaCertificateRepresentation;
 } {
   const escapedNewlines = /(?:\\r)?\\n/.test(value);
-  const ca = (escapedNewlines ? value.replace(/(?:\\r)?\\n/g, "\n") : value).trim();
+  const ca = (escapedNewlines ? value.replace(/(?:\\r)?\\n/g, "\n") : value).replace(
+    /^[ \t\r\n]+|[ \t\r\n]+$/g,
+    ""
+  );
   const hasWhitespaceNormalization =
-    /^[ \t]/.test(value) ||
-    /[ \t]$/.test(value) ||
+    /^[ \t\r\n]/.test(value) ||
+    /[ \t\r\n]$/.test(value) ||
     /\r\n/.test(value) ||
     /\n[ \t]+/.test(value);
   return {
@@ -105,11 +164,12 @@ function parseX509Certificate(value: string | Buffer): X509Certificate | null {
 function parseCaCertificate(ca: string): boolean {
   if (!ca) return false;
   const blocks = ca.match(CERTIFICATE_BLOCK_RE) ?? [];
-  const remainder = ca.replace(CERTIFICATE_BLOCK_RE, "").trim();
-  if (blocks.length === 0 || remainder.length > 0) return false;
+  const remainder = ca.replace(CERTIFICATE_BLOCK_RE, "").replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+  if (blocks.length !== 1 || remainder.length > 0) return false;
 
   for (const block of blocks) {
-    if (!parseX509Certificate(block)?.ca) return false;
+    const der = decodePemCertificate(block);
+    if (!der || !parseX509Certificate(der)?.ca) return false;
   }
   return true;
 }
@@ -215,10 +275,18 @@ function hasBasicConstraintsExtension(certificateNode: DerNode | null, bytes: Bu
   });
 }
 
-function decodePemCertificate(block: string): Buffer | null {
+function extractPemBody(block: string): string | null {
   const match = /^-----BEGIN CERTIFICATE-----\r?\n?([\s\S]*?)\r?\n?-----END CERTIFICATE-----$/.exec(block);
-  if (!match) return null;
-  const base64 = match[1].replace(/\s/g, "");
+  return match?.[1] ?? null;
+}
+
+function decodePemCertificate(block: string): Buffer | null {
+  const body = extractPemBody(block);
+  if (body === null) return null;
+  const normalizedBody = body.replace(/^(?:\r\n|\n)|(?:\r\n|\n)$/g, "");
+  const lines = normalizedBody.split(/\r\n|\n/);
+  if (lines.some((line) => line.length === 0)) return null;
+  const base64 = lines.join("");
   if (
     !base64 ||
     base64.length % 4 !== 0 ||
@@ -231,19 +299,157 @@ function decodePemCertificate(block: string): Buffer | null {
   return der.toString("base64") === base64 ? der : null;
 }
 
+function base64PayloadDiagnostics(bodies: string[], value: string, pemBlockCount: number): Pick<
+  CaCertificateFormatDiagnostic,
+  | "base64Length"
+  | "payloadLineCount"
+  | "payloadLineLengthsPlausible"
+  | "emptyPayloadLineCount"
+  | "asciiCharacterCount"
+  | "nonAsciiCharacterCount"
+  | "environmentNonAsciiCharacterCount"
+  | "whitespaceCharacterCount"
+  | "spaceCount"
+  | "tabCount"
+  | "carriageReturnCount"
+  | "lineFeedCount"
+  | "plusCount"
+  | "slashCount"
+  | "paddingCharacterCount"
+  | "unexpectedCharacterCount"
+  | "unexpectedCharacterClasses"
+  | "alphabetValid"
+  | "lengthModulo4"
+  | "paddingAtEnd"
+  | "paddingStructureValid"
+  | "paddingBeforeFinalCharacters"
+  | "possibleTruncation"
+  | "impossibleBase64Length"
+  | "unicodeWhitespaceCount"
+  | "unicodeDashLikeCount"
+  | "unicodeQuoteCount"
+  | "bomPresent"
+  | "controlCharacterCount"
+  | "zeroWidthCharacterCount"
+  | "knownGoodControlComparison"
+> {
+  const body = bodies.join("\n");
+  const base64 = body.replace(/\r\n|\n/g, "");
+  const characters = Array.from(body);
+  const environmentCharacters = Array.from(value);
+  const lines = bodies.flatMap((pemBody) => {
+    const trimmedBody = pemBody.replace(/^(?:\r\n|\n)|(?:\r\n|\n)$/g, "");
+    return trimmedBody ? trimmedBody.split(/\r\n|\n/) : [];
+  });
+  const paddingCharacterCount = countMatches(base64, /=/g);
+  const lengthModulo4 = base64.length % 4;
+  const alphabetValid = base64.length > 0 && /^[A-Za-z0-9+/=]+$/.test(base64);
+  const paddingAtEnd = paddingCharacterCount === 0 || /={1,2}$/.test(base64);
+  const paddingBeforeFinalCharacters = /=.*[^=]/.test(base64);
+  const paddingStructureValid =
+    alphabetValid &&
+    base64.length % 4 === 0 &&
+    /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64);
+  const unexpectedCharacterClasses = new Set<"non_ascii" | "whitespace" | "invalid_base64_symbol">();
+  let unexpectedCharacterCount = 0;
+  const environmentControlCharacterCount = environmentCharacters.filter(
+    (character) => /\p{Cc}/u.test(character) && character !== "\r" && character !== "\n"
+  ).length;
+  const environmentNonAsciiCharacterCount = environmentCharacters.filter(
+    (character) => character.codePointAt(0)! > 0x7f
+  ).length;
+  const environmentWhitespaceCount =
+    countMatches(value, /\p{White_Space}/gu) - countMatches(value, /[\t\n\v\f\r ]/g);
+  const environmentDashLikeCount = countMatches(value, /[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/gu);
+  const environmentQuoteCount = countMatches(value, /[\u2018-\u201F\u00AB\u00BB\u2039\u203A]/gu);
+  const environmentZeroWidthCount = countMatches(value, /[\u200B-\u200D\u2060]/gu);
+  const lineFeedCount = countMatches(body, /\n/g);
+
+  for (const character of Array.from(base64)) {
+    if (/[A-Za-z0-9+/=]/.test(character)) continue;
+    unexpectedCharacterCount += 1;
+    if (character.codePointAt(0)! > 0x7f) unexpectedCharacterClasses.add("non_ascii");
+    if (/\s/u.test(character)) unexpectedCharacterClasses.add("whitespace");
+    else unexpectedCharacterClasses.add("invalid_base64_symbol");
+  }
+
+  const characterClassMatchesControl =
+    characters.filter((character) => character.codePointAt(0)! <= 0x7f).length ===
+      KNOWN_GOOD_CONTROL_PROFILE.asciiCharacterCount &&
+    characters.filter((character) => character.codePointAt(0)! > 0x7f).length ===
+      KNOWN_GOOD_CONTROL_PROFILE.nonAsciiCharacterCount &&
+    countMatches(body, /\s/gu) === KNOWN_GOOD_CONTROL_PROFILE.whitespaceCharacterCount &&
+    countMatches(body, / /g) === KNOWN_GOOD_CONTROL_PROFILE.spaceCount &&
+    countMatches(body, /\t/g) === KNOWN_GOOD_CONTROL_PROFILE.tabCount &&
+    countMatches(body, /\r/g) === KNOWN_GOOD_CONTROL_PROFILE.carriageReturnCount &&
+    lineFeedCount === KNOWN_GOOD_CONTROL_PROFILE.lineFeedCount &&
+    countMatches(base64, /\+/g) === KNOWN_GOOD_CONTROL_PROFILE.plusCount &&
+    countMatches(base64, /\//g) === KNOWN_GOOD_CONTROL_PROFILE.slashCount &&
+    paddingCharacterCount === KNOWN_GOOD_CONTROL_PROFILE.paddingCharacterCount &&
+    unexpectedCharacterCount === KNOWN_GOOD_CONTROL_PROFILE.unexpectedCharacterCount;
+
+  return {
+    base64Length: bodies.length > 0 ? base64.length : null,
+    payloadLineCount: lines.length,
+    payloadLineLengthsPlausible: lines.length > 0 && lines.every((line) => line.length > 0 && line.length <= 64),
+    emptyPayloadLineCount: bodies.reduce((count, pemBody) => {
+      const trimmedBody = pemBody.replace(/^(?:\r\n|\n)|(?:\r\n|\n)$/g, "");
+      return count + (trimmedBody ? trimmedBody.split(/\r\n|\n/).filter((line) => line.length === 0).length : 0);
+    }, 0),
+    asciiCharacterCount: characters.filter((character) => character.codePointAt(0)! <= 0x7f).length,
+    nonAsciiCharacterCount: characters.filter((character) => character.codePointAt(0)! > 0x7f).length,
+    environmentNonAsciiCharacterCount,
+    whitespaceCharacterCount: countMatches(body, /\s/gu),
+    spaceCount: countMatches(body, / /g),
+    tabCount: countMatches(body, /\t/g),
+    carriageReturnCount: countMatches(body, /\r/g),
+    lineFeedCount,
+    plusCount: countMatches(base64, /\+/g),
+    slashCount: countMatches(base64, /\//g),
+    paddingCharacterCount,
+    unexpectedCharacterCount,
+    unexpectedCharacterClasses: [...unexpectedCharacterClasses],
+    alphabetValid,
+    lengthModulo4: bodies.length > 0 ? lengthModulo4 : null,
+    paddingAtEnd,
+    paddingStructureValid,
+    paddingBeforeFinalCharacters,
+    possibleTruncation: alphabetValid && lengthModulo4 !== 0,
+    impossibleBase64Length: bodies.length > 0 && lengthModulo4 === 1,
+    unicodeWhitespaceCount: environmentWhitespaceCount,
+    unicodeDashLikeCount: environmentDashLikeCount,
+    unicodeQuoteCount: environmentQuoteCount,
+    bomPresent: value.includes("\uFEFF"),
+    controlCharacterCount: environmentControlCharacterCount,
+    zeroWidthCharacterCount: environmentZeroWidthCount,
+    knownGoodControlComparison: {
+      samePemBlockCount: pemBlockCount === KNOWN_GOOD_CONTROL_PROFILE.pemBlockCount,
+      sameBase64Length: base64.length === KNOWN_GOOD_CONTROL_PROFILE.base64Length,
+      samePayloadLineCount: lines.length === KNOWN_GOOD_CONTROL_PROFILE.payloadLineCount,
+      sameCharacterClassDistribution: characterClassMatchesControl,
+      samePaddingStructure:
+        lengthModulo4 === KNOWN_GOOD_CONTROL_PROFILE.lengthModulo4 &&
+        paddingAtEnd === KNOWN_GOOD_CONTROL_PROFILE.paddingAtEnd &&
+        paddingStructureValid === KNOWN_GOOD_CONTROL_PROFILE.paddingStructureValid
+    }
+  };
+}
+
 export function diagnoseCaCertificateFormat(value: string | undefined): CaCertificateFormatDiagnostic {
   const defined = value !== undefined;
   const raw = value ?? "";
   const normalized = defined ? normalizeCaCertificate(raw) : null;
   const ca = normalized?.ca ?? "";
   const blocks = ca.match(CERTIFICATE_BLOCK_RE) ?? [];
-  const remainder = ca.replace(CERTIFICATE_BLOCK_RE, "").trim();
+  const remainder = ca.replace(CERTIFICATE_BLOCK_RE, "").replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
   const pemEnvelopeValid =
-    blocks.length > 0 &&
+    blocks.length === 1 &&
     remainder.length === 0 &&
     blocks.every((block) => /^-----BEGIN CERTIFICATE-----\r?\n?[\s\S]*?\r?\n?-----END CERTIFICATE-----$/.test(block));
-  const decoded = pemEnvelopeValid ? blocks.map(decodePemCertificate) : [];
+  const bodies = blocks.map(extractPemBody).filter((body): body is string => body !== null);
+  const decoded = blocks.map(decodePemCertificate);
   const base64Decodable = decoded.length > 0 && decoded.every((der) => der !== null);
+  const payloadDiagnostics = base64PayloadDiagnostics(bodies, raw, blocks.length);
   const derBuffers = base64Decodable ? (decoded as Buffer[]) : [];
   const derNodes = derBuffers.map(parseDer);
   const derStructureValid = derNodes.length > 0 && derNodes.every((node) => node !== null);
@@ -312,6 +518,7 @@ export function diagnoseCaCertificateFormat(value: string | undefined): CaCertif
     parserAccepted,
     pemEnvelopeValid,
     base64Decodable,
+    ...payloadDiagnostics,
     derStructureValid,
     derLength: base64Decodable ? derBuffers.reduce((length, der) => length + der.length, 0) : null,
     x509Parsable,

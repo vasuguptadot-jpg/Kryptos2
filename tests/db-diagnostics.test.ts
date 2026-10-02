@@ -261,6 +261,10 @@ describe("database diagnostics", () => {
         assert.equal(body.databaseDiagnostic.caFormat.parserAccepted, false);
         assert.equal(body.databaseDiagnostic.caFormat.pemEnvelopeValid, true);
         assert.equal(body.databaseDiagnostic.caFormat.base64Decodable, false);
+        assert.equal(body.databaseDiagnostic.caFormat.alphabetValid, false);
+        assert.equal(typeof body.databaseDiagnostic.caFormat.base64Length, "number");
+        assert.ok(Number(body.databaseDiagnostic.caFormat.unexpectedCharacterCount) > 0);
+        assert.ok(Array.isArray(body.databaseDiagnostic.caFormat.unexpectedCharacterClasses));
         assert.equal(body.databaseDiagnostic.caFormat.derStructureValid, false);
         assert.equal(body.databaseDiagnostic.caFormat.x509Parsable, false);
         assert.equal(body.databaseDiagnostic.caFormat.nativeX509Accepted, false);
@@ -273,6 +277,37 @@ describe("database diagnostics", () => {
           "basicConstraintsIndicatesCA",
           "basicConstraintsPresent",
           "base64Decodable",
+          "base64Length",
+          "payloadLineCount",
+          "payloadLineLengthsPlausible",
+          "emptyPayloadLineCount",
+          "asciiCharacterCount",
+          "nonAsciiCharacterCount",
+          "environmentNonAsciiCharacterCount",
+          "whitespaceCharacterCount",
+          "spaceCount",
+          "tabCount",
+          "carriageReturnCount",
+          "lineFeedCount",
+          "plusCount",
+          "slashCount",
+          "paddingCharacterCount",
+          "unexpectedCharacterCount",
+          "unexpectedCharacterClasses",
+          "alphabetValid",
+          "lengthModulo4",
+          "paddingAtEnd",
+          "paddingStructureValid",
+          "paddingBeforeFinalCharacters",
+          "possibleTruncation",
+          "impossibleBase64Length",
+          "unicodeWhitespaceCount",
+          "unicodeDashLikeCount",
+          "unicodeQuoteCount",
+          "bomPresent",
+          "controlCharacterCount",
+          "zeroWidthCharacterCount",
+          "knownGoodControlComparison",
           "certificateType",
           "certificateClassification",
           "classification",
@@ -296,6 +331,8 @@ describe("database diagnostics", () => {
           "x509Parsable"
         ].sort());
         assert.ok(!text.includes(malformedCa));
+        assert.ok(!text.includes("malformed-and-private"));
+        assert.ok(!text.includes(SECRET_URL));
         assert.ok(!text.includes("BEGIN CERTIFICATE"));
         assert.ok(!/fingerprint|sha.?256|hash|subject|issuer|serial/i.test(text));
       }
