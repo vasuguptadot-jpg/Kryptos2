@@ -115,6 +115,37 @@ describe("verified PostgreSQL TLS configuration", () => {
       "parserAccepted",
       "pemEnvelopeValid",
       "base64Decodable",
+      "base64Length",
+      "payloadLineCount",
+      "payloadLineLengthsPlausible",
+      "emptyPayloadLineCount",
+      "asciiCharacterCount",
+      "nonAsciiCharacterCount",
+      "environmentNonAsciiCharacterCount",
+      "whitespaceCharacterCount",
+      "spaceCount",
+      "tabCount",
+      "carriageReturnCount",
+      "lineFeedCount",
+      "plusCount",
+      "slashCount",
+      "paddingCharacterCount",
+      "unexpectedCharacterCount",
+      "unexpectedCharacterClasses",
+      "alphabetValid",
+      "lengthModulo4",
+      "paddingAtEnd",
+      "paddingStructureValid",
+      "paddingBeforeFinalCharacters",
+      "possibleTruncation",
+      "impossibleBase64Length",
+      "unicodeWhitespaceCount",
+      "unicodeDashLikeCount",
+      "unicodeQuoteCount",
+      "bomPresent",
+      "controlCharacterCount",
+      "zeroWidthCharacterCount",
+      "knownGoodControlComparison",
       "derStructureValid",
       "derLength",
       "x509Parsable",
@@ -307,6 +338,165 @@ describe("verified PostgreSQL TLS configuration", () => {
         !/-----BEGIN CERTIFICATE-----|subject|issuer|serial|fingerprint|sha.?256|hash|public.?key/i.test(serialized),
         `${testCase.name}: forbidden certificate metadata leaked`
       );
+    }
+  });
+
+  it("validates the exact strict Base64 path for normalizations and contaminated PEM", () => {
+    const begin = "-----BEGIN CERTIFICATE-----";
+    const end = "-----END CERTIFICATE-----";
+    const payload = SUPABASE_ROOT_2021_CA.replace(begin, "").replace(end, "").replace(/\s/g, "");
+    const pem = (body: string) => `${begin}\n${body}\n${end}`;
+    const cases = [
+      { name: "standard PEM", value: SUPABASE_ROOT_2021_CA, valid: true },
+      { name: "multiline Base64", value: pem(payload.match(/.{1,64}/g)?.join("\n") ?? ""), valid: true },
+      { name: "normal PEM line wrapping", value: pem(payload.match(/.{1,48}/g)?.join("\n") ?? ""), valid: true },
+      { name: "known-good Supabase Root 2021 CA", value: SUPABASE_ROOT_2021_CA, valid: true },
+      { name: "invalid Base64 symbol", value: pem(`!${payload.slice(1)}`), valid: false },
+      { name: "malformed padding", value: pem(`${payload}=`), valid: false },
+      { name: "truncated Base64", value: pem(payload.replace(/=$/, "")), valid: false },
+      { name: "impossible Base64 length", value: pem("A"), valid: false },
+      { name: "Unicode contamination", value: pem(`${payload.slice(0, 8)}\u00a0${payload.slice(8)}`), valid: false },
+      { name: "control-character contamination", value: pem(`${payload.slice(0, 8)}\u0001${payload.slice(8)}`), valid: false },
+      {
+        name: "BOM contamination",
+        value: `\uFEFF${SUPABASE_ROOT_2021_CA}`,
+        valid: false,
+        base64Valid: true
+      },
+      {
+        name: "Unicode dash in envelope",
+        value: SUPABASE_ROOT_2021_CA.replace("-----BEGIN", "\u2014----BEGIN"),
+        valid: false,
+        base64Valid: false
+      },
+      {
+        name: "Unicode quote in envelope",
+        value: `“${SUPABASE_ROOT_2021_CA}”`,
+        valid: false,
+        base64Valid: true
+      },
+      {
+        name: "zero-width contamination",
+        value: pem(`${payload.slice(0, 8)}\u200b${payload.slice(8)}`),
+        valid: false
+      },
+      { name: "empty Base64 payload", value: pem(""), valid: false },
+      { name: "missing PEM body", value: `${begin}${end}`, valid: false },
+      {
+        name: "multiple certificate blocks",
+        value: `${SUPABASE_ROOT_2021_CA}\n${SUPABASE_ROOT_2021_CA}`,
+        valid: false,
+        base64Valid: true
+      },
+      {
+        name: "overlong payload line",
+        value: pem(payload),
+        valid: true,
+        base64Valid: true
+      },
+      {
+        name: "empty payload line",
+        value: pem(`${payload.slice(0, 64)}\n\n${payload.slice(64)}`),
+        valid: false
+      },
+      {
+        name: "padding before final characters",
+        value: pem(`${payload.slice(0, 8)}=${payload.slice(8).replace(/=$/, "")}`),
+        valid: false
+      },
+      {
+        name: "literal newline normalization",
+        value: SUPABASE_ROOT_2021_CA.replace(/\n/g, "\\n"),
+        valid: true
+      },
+      {
+        name: "CRLF normalization",
+        value: SUPABASE_ROOT_2021_CA.replace(/\n/g, "\r\n"),
+        valid: true
+      },
+      {
+        name: "surrounding ASCII whitespace normalization",
+        value: ` \t\n${SUPABASE_ROOT_2021_CA}\n \t`,
+        valid: true
+      }
+    ] as const;
+
+    for (const testCase of cases) {
+      const metadata = diagnoseCaCertificateFormat(testCase.value);
+      assert.equal(metadata.parserAccepted, testCase.valid, testCase.name);
+      assert.equal(metadata.base64Decodable, "base64Valid" in testCase ? testCase.base64Valid : testCase.valid, testCase.name);
+      assert.ok(!JSON.stringify(metadata).includes(testCase.value), `${testCase.name} leaked input`);
+      if (testCase.name === "invalid Base64 symbol") {
+        assert.ok(metadata.unexpectedCharacterCount > 0);
+        assert.equal(metadata.alphabetValid, false);
+        assert.equal(metadata.knownGoodControlComparison.sameCharacterClassDistribution, false);
+      }
+      if (testCase.name === "Unicode contamination") {
+        assert.ok(metadata.nonAsciiCharacterCount > 0);
+        assert.ok(metadata.unicodeWhitespaceCount > 0);
+        assert.ok(metadata.unexpectedCharacterClasses.includes("non_ascii"));
+      }
+      if (testCase.name === "control-character contamination") {
+        assert.equal(metadata.controlCharacterCount, 1);
+      }
+      if (testCase.name === "BOM contamination") {
+        assert.equal(metadata.bomPresent, true);
+        assert.ok(metadata.environmentNonAsciiCharacterCount > 0);
+      }
+      if (testCase.name === "Unicode dash in envelope") {
+        assert.ok(metadata.unicodeDashLikeCount > 0);
+      }
+      if (testCase.name === "Unicode quote in envelope") {
+        assert.ok(metadata.unicodeQuoteCount > 0);
+      }
+      if (testCase.name === "zero-width contamination") {
+        assert.equal(metadata.zeroWidthCharacterCount, 1);
+      }
+      if (testCase.name === "impossible Base64 length") {
+        assert.equal(metadata.lengthModulo4, 1);
+        assert.equal(metadata.impossibleBase64Length, true);
+      }
+      if (testCase.name === "truncated Base64") {
+        assert.equal(metadata.possibleTruncation, true);
+        assert.equal(metadata.paddingStructureValid, false);
+      }
+      if (testCase.name === "empty Base64 payload") {
+        assert.equal(metadata.base64Length, 0);
+      }
+      if (testCase.name === "overlong payload line") {
+        assert.equal(metadata.payloadLineLengthsPlausible, false);
+      }
+      if (testCase.name === "empty payload line") {
+        assert.equal(metadata.emptyPayloadLineCount, 1);
+      }
+      if (testCase.name === "padding before final characters") {
+        assert.equal(metadata.paddingBeforeFinalCharacters, true);
+        assert.equal(metadata.paddingAtEnd, false);
+      }
+      if (testCase.name === "multiple certificate blocks") {
+        assert.equal(metadata.pemBlockCount, 2);
+        assert.equal(metadata.pemEnvelopeValid, false);
+      }
+    }
+
+    assert.deepEqual(diagnoseCaCertificateFormat(SUPABASE_ROOT_2021_CA).knownGoodControlComparison, {
+      samePemBlockCount: true,
+      sameBase64Length: true,
+      samePayloadLineCount: true,
+      sameCharacterClassDistribution: true,
+      samePaddingStructure: true
+    });
+  });
+
+  it("does not treat Node's permissive Base64 decoding as validation", () => {
+    assert.equal(Buffer.from("AA=A", "base64").length, 1);
+    assert.equal(Buffer.from("A", "base64").length, 0);
+    assert.equal(Buffer.from("%%%", "base64").length, 0);
+
+    for (const malformedPayload of ["AA=A", "A", "%%%"]) {
+      const malformed = `-----BEGIN CERTIFICATE-----\n${malformedPayload}\n-----END CERTIFICATE-----`;
+      assert.equal(diagnoseCaCertificateFormat(malformed).base64Decodable, false);
+      assert.throws(() => postgresTlsConfig({ DATABASE_CA_CERT: malformed }), /database_ca_cert_invalid/);
     }
   });
 
