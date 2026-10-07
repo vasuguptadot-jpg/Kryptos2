@@ -95,7 +95,7 @@ export const groqAdapter: Adapter = {
 
   async execute(ctx: CapabilityContext): Promise<AdapterResult> {
     if (ctx.capability.operation === "test") {
-      const model = modelAllowlist("GROQ_MODEL_ALLOWLIST", ctx.capability.config, ["llama-3.1-8b-instant"])[0];
+      const model = modelAllowlist("GROQ_MODEL_ALLOWLIST", ctx.capability.config, ["openai/gpt-oss-20b"])[0];
       const started = Date.now();
       await httpJson(
         `${BASE_URL}/openai/v1/chat/completions`,
