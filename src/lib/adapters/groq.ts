@@ -23,11 +23,7 @@ function validateInput(input: unknown, config: Record<string, unknown>): { ok: t
   for (const key of Object.keys(b)) {
     if (!INPUT_KEYS.has(key)) return { ok: false, error: `unsupported input field: ${key}` };
   }
-  const allowed = modelAllowlist("GROQ_MODEL_ALLOWLIST", config, [
-    "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
-    "mixtral-8x7b-32768"
-  ]);
+  const allowed = modelAllowlist("GROQ_MODEL_ALLOWLIST", config, ["openai/gpt-oss-20b"]);
   let model = allowed[0];
   if (b.model !== undefined) {
     if (typeof b.model !== "string" || b.model.length === 0 || b.model.length > 100) {
