@@ -1,4 +1,4 @@
-import { httpJson, modelAllowlist, providerTimeoutMs } from "./types";
+import { httpJson, modelAllowlist, ProviderHttpError, providerTimeoutMs } from "./types";
 import type { Adapter, AdapterResult, CapabilityContext, ConfigValidation } from "./types";
 
 const BASE_URL = "https://api.groq.com"; // fixed, never client-controlled
@@ -98,7 +98,12 @@ export const groqAdapter: Adapter = {
         {
           method: "POST",
           headers: { authorization: `Bearer ${ctx.secret}` }, // to Groq only; never returned
-          body: { model, messages: [{ role: "user", content: "ping" }], max_tokens: 4 }
+          body: {
+            model,
+            messages: [{ role: "user", content: "ping" }],
+            max_completion_tokens: 4,
+            ...(model === "openai/gpt-oss-20b" ? { reasoning_effort: "low", include_reasoning: false } : {})
+          }
         },
         providerTimeoutMs()
       );
@@ -121,20 +126,25 @@ export const groqAdapter: Adapter = {
         body: {
           model: p.model,
           messages,
-          max_tokens: p.maxOutputTokens,
+          max_completion_tokens: p.maxOutputTokens,
+          ...(p.model === "openai/gpt-oss-20b" ? { reasoning_effort: "low", include_reasoning: false } : {}),
           ...(p.temperature !== undefined ? { temperature: p.temperature } : {})
         }
       },
       providerTimeoutMs()
     );
     const choices = (json as { choices?: { message?: { content?: string }; finish_reason?: string }[] })?.choices;
+    const text = choices?.[0]?.message?.content;
+    if (typeof text !== "string" || text.trim().length === 0) {
+      throw new ProviderHttpError(502, "Groq returned an empty completion");
+    }
     const usage = (json as { usage?: Record<string, number> })?.usage ?? {};
     return {
       ok: true,
       status: 200,
       data: {
         model: p.model,
-        text: (choices?.[0]?.message?.content ?? "").slice(0, MAX_RESPONSE_CHARS),
+        text: text.slice(0, MAX_RESPONSE_CHARS),
         usage: { promptTokens: usage.prompt_tokens ?? null, completionTokens: usage.completion_tokens ?? null },
         finishReason: choices?.[0]?.finish_reason ?? null
       }
