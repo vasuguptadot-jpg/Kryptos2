@@ -4,6 +4,25 @@ import { json, jsonError } from "@/lib/http";
 import { isSecretConfigured } from "@/lib/secrets";
 import { getStore } from "@/lib/store";
 
+function redactStaticHeaders(config: Record<string, unknown>): Record<string, unknown> {
+  if (!Object.prototype.hasOwnProperty.call(config, "staticHeaders")) return config;
+  const headers = config.staticHeaders;
+  const isRecord =
+    typeof headers === "object" &&
+    headers !== null &&
+    !Array.isArray(headers) &&
+    (Object.getPrototypeOf(headers) === Object.prototype || Object.getPrototypeOf(headers) === null);
+  if (!isRecord || Object.entries(headers).some(([name, value]) => !/^[A-Za-z][A-Za-z0-9-]{0,63}$/.test(name) || typeof value !== "string")) {
+    const safeConfig = { ...config };
+    delete safeConfig.staticHeaders;
+    return safeConfig;
+  }
+  return {
+    ...config,
+    staticHeaders: Object.fromEntries(Object.keys(headers).map((name) => [name, "[REDACTED]"]))
+  };
+}
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -26,7 +45,7 @@ export async function GET(req: Request): Promise<Response> {
         secretName: c.secretName,
         secretConfigured: isSecretConfigured(c.secretName) ? "CONFIGURED" : "NOT CONFIGURED",
         secretEnabled: secretByName.get(c.secretName) ?? false,
-        config: c.config,
+        config: redactStaticHeaders(c.config),
         enabled: c.enabled,
         createdAt: c.createdAt,
         updatedAt: c.updatedAt
@@ -98,7 +117,7 @@ export async function POST(req: Request): Promise<Response> {
       enabled
     });
     await auditAdmin(req, "capability.upsert", "success", 200);
-    return json({ capability: rec }, 200);
+    return json({ capability: { ...rec, config: redactStaticHeaders(rec.config) } }, 200);
   } catch {
     await auditAdmin(req, "capability.upsert", "failure", 503, "store_unavailable");
     return jsonError(503, "store_unavailable", "Metadata store unavailable");

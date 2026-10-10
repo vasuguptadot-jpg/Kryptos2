@@ -1,4 +1,5 @@
-import { httpJson, providerTimeoutMs } from "./types";
+import { activeSecretValues } from "../secrets";
+import { httpJson, ProviderHttpError, providerTimeoutMs } from "./types";
 import type { Adapter, AdapterResult, CapabilityContext, ConfigValidation } from "./types";
 
 /**
@@ -23,6 +24,17 @@ const HEADER_NAME_RE = /^[A-Za-z][A-Za-z0-9-]{0,63}$/;
 const FIELD_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 const STATIC_VALUE_MAX = 500;
 const MAX_RESPONSE_CHARS = 20_000;
+
+function containsCredential(value: unknown, credentials: readonly string[]): boolean {
+  if (typeof value === "string") return credentials.some((credential) => value.includes(credential));
+  if (Array.isArray(value)) return value.some((item) => containsCredential(item, credentials));
+  if (typeof value === "object" && value !== null) {
+    return Object.entries(value as Record<string, unknown>).some(
+      ([key, item]) => credentials.some((credential) => key.includes(credential)) || containsCredential(item, credentials)
+    );
+  }
+  return false;
+}
 
 /** Input fields that could attempt to steer resolution — always rejected. */
 const FORBIDDEN_INPUT_KEYS = new Set([
@@ -239,7 +251,15 @@ export const httpGenericAdapter: Adapter = {
       headers[config.auth.name] = ctx.secret; // secret only to the approved origin
     }
 
-    const upstream = await httpJson(url.toString(), { method: config.method, headers, body }, providerTimeoutMs());
+    let upstream: Awaited<ReturnType<typeof httpJson>>;
+    try {
+      upstream = await httpJson(url.toString(), { method: config.method, headers, body }, providerTimeoutMs());
+    } catch (err) {
+      if (err instanceof ProviderHttpError) {
+        throw new ProviderHttpError(err.status, "Provider request failed");
+      }
+      throw err;
+    }
 
     // --- Sanitize the response ----------------------------------------------
     let payload: unknown = upstream.json !== null ? upstream.json : upstream.text;
@@ -250,6 +270,10 @@ export const httpGenericAdapter: Adapter = {
         }
         return undefined;
       }, upstream.json);
+    }
+    const credentials = [ctx.secret, ...Object.values(config.staticHeaders ?? {}), ...activeSecretValues()].filter(Boolean);
+    if (containsCredential(payload, credentials)) {
+      return { ok: false, status: 502, data: null, errorCode: "provider_response_contains_credential" };
     }
     const serialized = JSON.stringify({ data: payload });
     const bounded = serialized.length > MAX_RESPONSE_CHARS * 2 ? { data: "response truncated", truncated: true } : null;

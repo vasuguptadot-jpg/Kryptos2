@@ -170,6 +170,7 @@ describe("admin surface & health", () => {
     assert.equal(secretRes.status, 201);
     const secretBody = (await secretRes.json()) as { secret: { secretName: string; status: string } };
     assert.equal(secretBody.secret.status, "CONFIGURED");
+    const staticHeaderCredential = "synthetic-static-header-credential-not-real";
 
     // Attempts to sneak a value/content field in are rejected.
     const sneak = await secretsPOST(
@@ -192,12 +193,16 @@ describe("admin surface & health", () => {
             baseUrl: "https://api.weather.example.com",
             path: "/v1/current",
             method: "GET",
-            auth: { placement: "query", name: "appid" }
+            auth: { placement: "query", name: "appid" },
+            staticHeaders: { "X-Partner-Key": staticHeaderCredential }
           }
         })
       }, cookie)
     );
     assert.equal(capRes.status, 200, await capRes.clone().text());
+    const capCreateText = await capRes.clone().text();
+    assert.ok(!capCreateText.includes(staticHeaderCredential), "capability create response leaked static header value");
+    assert.ok(capCreateText.includes("[REDACTED]"));
 
     // SSRF config is refused at registration time.
     const ssrf = await capsPOST(
@@ -237,9 +242,51 @@ describe("admin surface & health", () => {
     assert.ok(!secretsText.includes("synthetic-weather-admin-test-key-value"), "secret VALUE leaked to admin listing");
 
     const capsList = await capsGET(adminReq("/api/admin/capabilities", {}, cookie));
-    const capsBody = (await capsList.json()) as { capabilities: { capability: string }[]; adapters: unknown[] };
+    const capsText = await capsList.text();
+    assert.ok(!capsText.includes(staticHeaderCredential), "capability list leaked static header value");
+    assert.ok(capsText.includes("[REDACTED]"));
+    const capsBody = JSON.parse(capsText) as { capabilities: { capability: string }[]; adapters: unknown[] };
     assert.ok(capsBody.capabilities.some((x) => x.capability === "weather.current"));
     assert.ok(capsBody.adapters.length >= 3);
+  });
+
+  it("omits malformed static header configs from capability listings", async () => {
+    const good = await loginPOST(
+      adminReq("/api/admin/login", {
+        method: "POST",
+        body: JSON.stringify({ username: "test-admin", password: "test-admin-password-000111222333" })
+      })
+    );
+    const cookie = good.headers.get("set-cookie") ?? "";
+    const malformedArrayCredential = "synthetic-malformed-array-credential-not-real";
+    const malformedValueCredential = "synthetic-malformed-value-credential-not-real";
+
+    for (const [capability, staticHeaders] of [
+      ["weather.malformed_array", [malformedArrayCredential]],
+      ["weather.malformed_value", { "X-Partner-Key": { credential: malformedValueCredential } }]
+    ] as const) {
+      await ctx.store.upsertCapability({
+        capability,
+        providerId: "http-generic",
+        secretName: "GROQ_API_KEY",
+        operation: "request",
+        config: { baseUrl: "https://api.weather.example.com", staticHeaders },
+        enabled: true
+      });
+    }
+
+    const response = await capsGET(adminReq("/api/admin/capabilities", {}, cookie));
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.ok(!text.includes(malformedArrayCredential));
+    assert.ok(!text.includes(malformedValueCredential));
+    const body = JSON.parse(text) as { capabilities: { capability: string; config: Record<string, unknown> }[] };
+    for (const capability of ["weather.malformed_array", "weather.malformed_value"]) {
+      const record = body.capabilities.find((entry) => entry.capability === capability);
+      assert.ok(record);
+      assert.equal(Object.hasOwn(record.config, "staticHeaders"), false);
+      assert.equal(record.config.baseUrl, "https://api.weather.example.com");
+    }
   });
 
   it("admin login brute-forcing gets throttled with 429", async () => {

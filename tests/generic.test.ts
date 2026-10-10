@@ -190,11 +190,96 @@ describe("generic capability architecture", () => {
       assert.equal(res.status, 502);
       const text = await res.text();
       assert.ok(!text.includes(WEATHER_KEY), "arbitrary secret leaked via provider error");
-      assert.ok(text.includes("[REDACTED]"));
+      const body = JSON.parse(text);
+      assert.equal(body.error.message, "Provider request failed");
     } finally {
       globalThis.fetch = originalFetch;
     }
     assert.ok(!redactSecrets(`key=${WEATHER_KEY}`).includes(WEATHER_KEY));
+  });
+
+  it("fails closed when successful JSON contains a configured credential", async () => {
+    const { app, key } = await ctx.makeApp({
+      appId: "JSON_ECHO_APP",
+      permissions: [{ permission: "weather.current", rateLimitPerMinute: null }]
+    });
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ data: { nested: [{ token: WEATHER_KEY }], [WEATHER_KEY]: "echo" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }) as typeof fetch;
+    try {
+      const res = await handleExecuteRequest(
+        executeRequest(app.appId, key, { capability: "weather.current", input: {} })
+      );
+      assert.equal(res.status, 502);
+      const text = await res.text();
+      assert.ok(!text.includes(WEATHER_KEY));
+      assert.equal(calls, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("fails closed when successful text contains a configured credential", async () => {
+    const { app, key } = await ctx.makeApp({
+      appId: "TEXT_ECHO_APP",
+      permissions: [{ permission: "weather.current", rateLimitPerMinute: null }]
+    });
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response(`upstream echoed ${WEATHER_KEY}`, {
+        status: 200,
+        headers: { "content-type": "text/plain" }
+      });
+    }) as typeof fetch;
+    try {
+      const res = await handleExecuteRequest(
+        executeRequest(app.appId, key, { capability: "weather.current", input: {} })
+      );
+      assert.equal(res.status, 502);
+      const text = await res.text();
+      assert.ok(!text.includes(WEATHER_KEY));
+      assert.equal(calls, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("does not reflect static-header credentials in provider errors", async () => {
+    const staticHeaderCredential = "synthetic-static-header-error-credential-not-real";
+    await ctx.store.upsertCapability({
+      capability: "weather.current",
+      providerId: "http-generic",
+      secretName: "MY_WEATHER_API_KEY",
+      operation: "request",
+      config: { ...WEATHER_CONFIG, staticHeaders: { "X-Partner-Key": staticHeaderCredential } },
+      enabled: true
+    });
+    const { app, key } = await ctx.makeApp({
+      appId: "ERROR_ECHO_APP",
+      permissions: [{ permission: "weather.current", rateLimitPerMinute: null }]
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: `bad credential ${staticHeaderCredential}` }), { status: 401 })) as typeof fetch;
+    try {
+      const res = await handleExecuteRequest(
+        executeRequest(app.appId, key, { capability: "weather.current", input: {} })
+      );
+      assert.equal(res.status, 502);
+      const body = await res.json();
+      assert.equal(body.error.message, "Provider request failed");
+      assert.ok(!JSON.stringify(body).includes(staticHeaderCredential));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 
